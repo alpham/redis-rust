@@ -39,7 +39,11 @@ fn handle_client(mut stream: TcpStream) {
         let buf_string = String::from_utf8_lossy(&buf);
         println!("{}", buf_string);
         let command = parser::parse_request(&buf).unwrap();
-        let result = commands::run_command(command).unwrap();
+        let result = match commands::run_command(command) {
+            Ok(res) => res,
+            Err(e) => format!("+{}\r\n",e)
+        };
+
         stream.write_all(result.as_bytes()).unwrap();
     }
 }
