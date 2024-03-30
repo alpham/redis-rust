@@ -1,7 +1,7 @@
 #[macro_use]
 extern crate lazy_static;
+use clap::Parser;
 mod internal;
-
 use std::error::Error;
 use std::{
     io::{Read, Write},
@@ -9,12 +9,14 @@ use std::{
     thread,
 };
 
-use crate::internal::{commands, parser};
+use crate::internal::{cli, commands, parser};
 
 fn main() -> Result<(), Box<dyn Error>> {
     // You can use print statements as follows for debugging, they'll be visible when running tests.
 
-    let listener = TcpListener::bind("127.0.0.1:6379").unwrap();
+    let args = cli::CliArgs::parse();
+    let address = format!("{}:{}", "127.0.0.1", args.port);
+    let listener = TcpListener::bind(address).unwrap();
     for stream in listener.incoming() {
         thread::spawn(|| match stream {
             Ok(stream) => {
