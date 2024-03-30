@@ -1,4 +1,3 @@
-
 pub struct Command {
     pub cmd: String,
     pub args: Vec<String>,
@@ -9,7 +8,7 @@ pub fn parse_request(buf: &[u8]) -> Result<Command, String> {
     let mut lines = body.lines();
     // the first line is the global description.
     let global_desc = lines.next().unwrap();
-    let number_args = global_desc[1..].parse::<i32>().unwrap(); 
+    let number_args = global_desc[1..].parse::<i32>().unwrap();
     // ignore the length of the command;
     let _ = lines.next();
     let cmd = lines.next().unwrap().to_string();
@@ -18,9 +17,8 @@ pub fn parse_request(buf: &[u8]) -> Result<Command, String> {
         // ignore number of characters of each line
         let _ = lines.next();
         let arg = lines.next().unwrap().to_string();
-        args.push(arg); 
+        args.push(arg);
     }
 
-    Ok(Command {cmd, args})
+    Ok(Command { cmd, args })
 }
-

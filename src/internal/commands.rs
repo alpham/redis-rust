@@ -1,16 +1,16 @@
 use std::{
     collections::HashMap,
-    sync::Mutex,
-    fmt::{ Display, Formatter},
-    error::Error
+    error::Error,
+    fmt::{Display, Formatter},
 };
 
 use crate::internal::parser::Command;
+use crate::internal::storage::{DBEntry, DBEntryValueType, STORAGE};
 
 #[derive(Debug)]
-pub enum CommandError{
+pub enum CommandError {
     CommandNotFound(String),
-    InvalidArgument(String), 
+    InvalidArgument(String),
     StorageError(String),
 }
 
@@ -23,7 +23,8 @@ impl Display for CommandError {
             CommandError::InvalidArgument(msg) => write!(f, "Invalid arguments: {}", msg),
             CommandError::StorageError(msg) => write!(f, "Storage error: {}", msg),
         }
-    }}
+    }
+}
 
 type CommandFn = fn(Vec<String>) -> Result<String, CommandError>;
 macro_rules! register_commands {
@@ -36,16 +37,14 @@ macro_rules! register_commands {
     };
 }
 lazy_static! {
-        static ref COMMANDS_REGISTRY: HashMap<&'static str, CommandFn> = register_commands! {
-            ping => ping,
-            echo => echo,
-            get => get,
-            set => set
-        };
-    static ref STORAGE: Mutex<HashMap<String, String>> = Mutex::new(HashMap::new());
+    static ref COMMANDS_REGISTRY: HashMap<&'static str, CommandFn> = register_commands! {
+        ping => ping,
+        echo => echo,
+        get => get,
+        set => set
+    };
 }
 
-    
 pub fn run_command(command: Command) -> Result<String, CommandError> {
     let function = COMMANDS_REGISTRY
         .get(command.cmd.to_lowercase().as_str())
@@ -57,19 +56,22 @@ fn ping(_args: Vec<String>) -> Result<String, CommandError> {
     Ok("+PONG\r\n".to_string())
 }
 
-fn echo(args: Vec<String>) -> Result<String, CommandError>  {
-    Ok(
-        format!("+{}\r\n", args.get(0).unwrap()).to_string()
-    )
+fn echo(args: Vec<String>) -> Result<String, CommandError> {
+    Ok(format!("+{}\r\n", args.get(0).unwrap()).to_string())
 }
 
 fn set(args: Vec<String>) -> Result<String, CommandError> {
     let key = args.get(0).unwrap();
-    let value = args.get(1).ok_or_else(
-        || CommandError::InvalidArgument("Missing arguments".to_string())
-    )?;
-
-    STORAGE.lock().unwrap().insert(key.to_string(), value.to_string());
+    let value = args
+        .get(1)
+        .ok_or_else(|| CommandError::InvalidArgument("Missing arguments".to_string()))?;
+    let mut db_entry = DBEntry::from_string(value, DBEntryValueType::StringType);
+    if args.len() > 2 {
+        if args[2] == "px".to_string() {
+            db_entry.set_ttl(args.get(3))?;
+        }
+    }
+    STORAGE.lock().unwrap().insert(key.to_string(), db_entry);
     Ok("+OK\r\n".to_string())
 }
 
@@ -77,9 +79,21 @@ fn get(args: Vec<String>) -> Result<String, CommandError> {
     let key = args.get(0).unwrap();
     match STORAGE.lock().unwrap().get(key) {
         Some(val) => {
-            let res = format!("${}\r\n{}\r\n", val.len() ,val.to_string());
+            let res = format_result(val);
             Ok(res)
         }
-        None => Err(CommandError::StorageError("$-1\r\n".to_string()))
+        None => Err(CommandError::StorageError("$-1\r\n".to_string())),
+    }
+}
+
+fn format_result(value: &DBEntry) -> String {
+    match value.to_string() {
+        Ok(value) => format!("${}\r\n{}\r\n", value.len(), value),
+        Err(_) => "$-1\r\n".to_string(),
+        // Err(e) => match e {
+        //     CommandError::StorageError(_),
+        //     CommandError::InvalidArgument(_),
+        //     CommandError::CommandNotFound(_) => "$-1\r\n".to_string(),
+        // }
     }
 }
