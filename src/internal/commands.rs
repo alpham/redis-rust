@@ -41,7 +41,8 @@ lazy_static! {
         ping => ping,
         echo => echo,
         get => get,
-        set => set
+        set => set,
+        info => info
     };
 }
 
@@ -84,6 +85,15 @@ fn get(args: Vec<String>) -> Result<String, CommandError> {
         }
         None => Err(CommandError::StorageError("$-1\r\n".to_string())),
     }
+}
+
+fn info(args: Vec<String>) -> Result<String, CommandError> {
+    let info_section = args.get(0).unwrap();
+    if info_section == "replication" {
+        let response = "role:master".to_string();
+        return Ok(format!("${}\r\n{}\r\n", response.len(), response));
+    }
+    Ok(String::new())
 }
 
 fn format_result(value: &DBEntry) -> String {
