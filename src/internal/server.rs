@@ -15,10 +15,20 @@ use super::cli::Replicaof;
 #[derive(Debug)]
 pub struct ServerMetadata {
     pub role: u8,
+    pub master_replid: String,
+    pub master_repl_offset: u8,
     port: u16,
     host: String
 }
 
+
+fn get_master_replid() -> String {
+    "8371b4fb1155b71f4a04d3e1bc3e18c4a990aeeb".to_string()
+}
+
+fn get_master_repl_offset() -> u8 {
+    0
+}
 
 pub fn start_server(host: &str, port: u16, replicaof: Option<Replicaof>) -> Result<(), Box<dyn Error>> {
     let address = format!("{}:{}", host, port);
@@ -26,6 +36,9 @@ pub fn start_server(host: &str, port: u16, replicaof: Option<Replicaof>) -> Resu
     let metadata = Arc::new(ServerMetadata {
         port,
         host: host.to_string(),
+
+        master_replid: get_master_replid(),
+        master_repl_offset: get_master_repl_offset(),
         role: match replicaof {
             Some(_) => 1,
             None => 0,

@@ -7,12 +7,14 @@ use std::{
 use crate::internal::parser::Command;
 use crate::internal::server::ServerMetadata;
 use crate::internal::storage::{DBEntry, DBEntryValueType, STORAGE};
+use crate::internal::server_info;
 
 #[derive(Debug)]
 pub enum CommandError {
     CommandNotFound(String),
     InvalidArgument(String),
     StorageError(String),
+    ErrorWhileExecution(String)
 }
 
 impl Error for CommandError {}
@@ -23,6 +25,7 @@ impl Display for CommandError {
             CommandError::CommandNotFound(cmd) => write!(f, "Command not found: {}", cmd),
             CommandError::InvalidArgument(msg) => write!(f, "Invalid arguments: {}", msg),
             CommandError::StorageError(msg) => write!(f, "Storage error: {}", msg),
+            CommandError::ErrorWhileExecution(msg) => write!(f, "Error while executing the command: {}", msg)
         }
     }
 }
@@ -93,15 +96,17 @@ fn get(args: Vec<String>, _server_metadata: &ServerMetadata) -> Result<String, C
 
 fn info(args: Vec<String>, server_metadata: &ServerMetadata) -> Result<String, CommandError> {
     let info_section = args.get(0).unwrap();
-    let mut response = String::new();
+    let response = String::new();
     if info_section == "replication" {
-        if server_metadata.role == 0 {
-            response = "role:master".to_string();
-        } else if server_metadata.role == 1 {
-            response = "role:slave".to_string();
+        match server_info::get_server_info(server_metadata) {
+            Ok(res) => {
+                println!("{}", res);
+                return Ok(res);
+            },
+            Err(_) => return Err(CommandError::ErrorWhileExecution("Cannot return replication info".to_string()))
         }
     }
-    Ok(format!("${}\r\n{}\r\n", response.len(), response))
+    Ok(response)
 }
 
 fn format_result(value: &DBEntry) -> String {
