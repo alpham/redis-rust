@@ -17,8 +17,8 @@ pub struct ServerMetadata {
     pub role: u8,
     pub master_replid: String,
     pub master_repl_offset: u8,
-    port: u16,
-    host: String
+    _port: u16,
+    _host: String
 }
 
 
@@ -34,8 +34,8 @@ pub fn start_server(host: &str, port: u16, replicaof: Option<Replicaof>) -> Resu
     let address = format!("{}:{}", host, port);
     let listener = TcpListener::bind(address).unwrap();
     let metadata = Arc::new(ServerMetadata {
-        port,
-        host: host.to_string(),
+        _port: port,
+        _host: host.to_string(),
 
         master_replid: get_master_replid(),
         master_repl_offset: get_master_repl_offset(),
@@ -62,8 +62,6 @@ fn handle_client(mut stream: TcpStream, server_metadata: Arc<ServerMetadata>) {
     let mut buf = [0u8; 255];
     let metadata = &*server_metadata;
     while let Ok(_) = stream.read(&mut buf) {
-        let buf_string = String::from_utf8_lossy(&buf);
-        println!("{}", buf_string);
         let command = parser::parse_request(&buf).unwrap();
         let result = match commands::run_command(command, metadata) {
             Ok(res) => res,

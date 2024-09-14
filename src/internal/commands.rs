@@ -100,7 +100,6 @@ fn info(args: Vec<String>, server_metadata: &ServerMetadata) -> Result<String, C
     if info_section == "replication" {
         match server_info::get_server_info(server_metadata) {
             Ok(res) => {
-                println!("{}", res);
                 return Ok(res);
             },
             Err(_) => return Err(CommandError::ErrorWhileExecution("Cannot return replication info".to_string()))

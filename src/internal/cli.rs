@@ -19,12 +19,13 @@ pub struct CliArgs {
 
 #[derive(Debug, Clone)]
 pub struct Replicaof {
-    host: String,
-    port: u16,
+    pub host: String,
+    pub port: u16,
 }
 
 #[derive(Debug)]
 pub enum ParseReplicaofError {
+    #[allow(dead_code)]
     InvalidArguments,
     ParseIntError(ParseIntError),
 }
