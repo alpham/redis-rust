@@ -44,6 +44,7 @@ pub fn start_server(host: &str, port: u16, replicaof: Option<Replicaof>) -> Resu
             None => 0,
         }
     });
+    connect_master(replicaof);
     for stream in listener.incoming() {
         let cloned_metadata = Arc::clone(&metadata);
         thread::spawn(|| match stream {
@@ -69,5 +70,21 @@ fn handle_client(mut stream: TcpStream, server_metadata: Arc<ServerMetadata>) {
         };
 
         stream.write_all(result.as_bytes()).unwrap();
+    }
+}
+
+fn connect_master(replicaof: Option<Replicaof>) {
+    match replicaof {
+        Some(master) => {
+            if let Ok(mut stream) = TcpStream::connect(format!("{}:{}", master.host, master.port)) {
+                let mut result = bytes::BytesMut::new() ;
+                let _ = stream.write("*1\r\n$4\r\nPING\r\n".as_bytes());
+                let _ = stream.read(result.as_mut());
+                println!("{}", String::from_utf8_lossy(result.as_ref()));
+            } else {
+                println!("Cannot connect to the master serever.")
+            }
+        },
+        None => return
     }
 }
