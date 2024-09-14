@@ -5,6 +5,7 @@ use std::{
 };
 
 use crate::internal::parser::Command;
+use crate::internal::server::ServerMetadata;
 use crate::internal::storage::{DBEntry, DBEntryValueType, STORAGE};
 
 #[derive(Debug)]
@@ -26,7 +27,7 @@ impl Display for CommandError {
     }
 }
 
-type CommandFn = fn(Vec<String>) -> Result<String, CommandError>;
+type CommandFn = fn(Vec<String>, &ServerMetadata) -> Result<String, CommandError>;
 macro_rules! register_commands {
     ($($name:ident => $func:ident), *) => {
         {
@@ -46,22 +47,25 @@ lazy_static! {
     };
 }
 
-pub fn run_command(command: Command) -> Result<String, CommandError> {
+pub fn run_command(
+    command: Command,
+    server_metadata: &ServerMetadata,
+) -> Result<String, CommandError> {
     let function = COMMANDS_REGISTRY
         .get(command.cmd.to_lowercase().as_str())
         .ok_or_else(|| CommandError::CommandNotFound(command.cmd))?;
-    function(command.args)
+    function(command.args, server_metadata)
 }
 
-fn ping(_args: Vec<String>) -> Result<String, CommandError> {
+fn ping(_args: Vec<String>, _server_metadata: &ServerMetadata) -> Result<String, CommandError> {
     Ok("+PONG\r\n".to_string())
 }
 
-fn echo(args: Vec<String>) -> Result<String, CommandError> {
+fn echo(args: Vec<String>, _server_metadata: &ServerMetadata) -> Result<String, CommandError> {
     Ok(format!("+{}\r\n", args.get(0).unwrap()).to_string())
 }
 
-fn set(args: Vec<String>) -> Result<String, CommandError> {
+fn set(args: Vec<String>, _server_metadata: &ServerMetadata) -> Result<String, CommandError> {
     let key = args.get(0).unwrap();
     let value = args
         .get(1)
@@ -76,7 +80,7 @@ fn set(args: Vec<String>) -> Result<String, CommandError> {
     Ok("+OK\r\n".to_string())
 }
 
-fn get(args: Vec<String>) -> Result<String, CommandError> {
+fn get(args: Vec<String>, _server_metadata: &ServerMetadata) -> Result<String, CommandError> {
     let key = args.get(0).unwrap();
     match STORAGE.lock().unwrap().get(key) {
         Some(val) => {
@@ -87,13 +91,17 @@ fn get(args: Vec<String>) -> Result<String, CommandError> {
     }
 }
 
-fn info(args: Vec<String>) -> Result<String, CommandError> {
+fn info(args: Vec<String>, server_metadata: &ServerMetadata) -> Result<String, CommandError> {
     let info_section = args.get(0).unwrap();
+    let mut response = String::new();
     if info_section == "replication" {
-        let response = "role:master".to_string();
-        return Ok(format!("${}\r\n{}\r\n", response.len(), response));
+        if server_metadata.role == 0 {
+            response = "role:master".to_string();
+        } else if server_metadata.role == 1 {
+            response = "role:slave".to_string();
+        }
     }
-    Ok(String::new())
+    Ok(format!("${}\r\n{}\r\n", response.len(), response))
 }
 
 fn format_result(value: &DBEntry) -> String {
