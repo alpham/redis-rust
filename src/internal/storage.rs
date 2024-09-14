@@ -63,7 +63,6 @@ impl DBEntry {
 
     fn still_valid(&self) -> bool {
         if let Some(ttl) = self.metadata.ttl {
-            println!("found ttl --> {}", ttl.as_millis());
             let expiry_time = self.metadata.created_at + ttl;
             if SystemTime::now() > expiry_time {
                 return false;

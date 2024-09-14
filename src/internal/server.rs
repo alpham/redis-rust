@@ -1,16 +1,13 @@
+use crate::internal::{commands, parser};
 use std::{
-    thread,
-    sync::Arc,
-    net::{TcpListener, TcpStream},
+    error::Error,
     io::{Read, Write},
-    error::Error
-};
-use crate::internal:: {
-    commands, parser
+    net::{TcpListener, TcpStream},
+    sync::Arc,
+    thread,
 };
 
 use super::cli::Replicaof;
-
 
 #[derive(Debug)]
 pub struct ServerMetadata {
@@ -18,9 +15,8 @@ pub struct ServerMetadata {
     pub master_replid: String,
     pub master_repl_offset: u8,
     _port: u16,
-    _host: String
+    _host: String,
 }
-
 
 fn get_master_replid() -> String {
     "8371b4fb1155b71f4a04d3e1bc3e18c4a990aeeb".to_string()
@@ -30,7 +26,11 @@ fn get_master_repl_offset() -> u8 {
     0
 }
 
-pub fn start_server(host: &str, port: u16, replicaof: Option<Replicaof>) -> Result<(), Box<dyn Error>> {
+pub fn start_server(
+    host: &str,
+    port: u16,
+    replicaof: Option<Replicaof>,
+) -> Result<(), Box<dyn Error>> {
     let address = format!("{}:{}", host, port);
     let listener = TcpListener::bind(address).unwrap();
     let metadata = Arc::new(ServerMetadata {
@@ -42,9 +42,12 @@ pub fn start_server(host: &str, port: u16, replicaof: Option<Replicaof>) -> Resu
         role: match replicaof {
             Some(_) => 1,
             None => 0,
-        }
+        },
     });
-    connect_master(replicaof);
+
+    // Configuring the replica.
+    configure_replica(&replicaof);
+
     for stream in listener.incoming() {
         let cloned_metadata = Arc::clone(&metadata);
         thread::spawn(|| match stream {
@@ -59,32 +62,60 @@ pub fn start_server(host: &str, port: u16, replicaof: Option<Replicaof>) -> Resu
     Ok(())
 }
 
+fn configure_replica(replicaof: &Option<Replicaof>) {
+    match replicaof {
+        Some(replicaof) => {
+            if let Ok(mut stream) = TcpStream::connect(format!("{}:{}", replicaof.host, replicaof.port)) {
+               let _ = ping_master(&mut stream);
+               let _ = replicaconf_master(&mut stream);
+            } else {
+                return
+            }
+        },
+        None => return
+    }
+}
+
 fn handle_client(mut stream: TcpStream, server_metadata: Arc<ServerMetadata>) {
     let mut buf = [0u8; 255];
     let metadata = &*server_metadata;
-    while let Ok(_) = stream.read(&mut buf) {
+    while let Ok(count) = stream.read(&mut buf) {
+        if count == 0 {
+            continue;
+        }
         let command = parser::parse_request(&buf).unwrap();
         let result = match commands::run_command(command, metadata) {
             Ok(res) => res,
             Err(e) => format!("+{}\r\n", e),
         };
-
         stream.write_all(result.as_bytes()).unwrap();
     }
 }
 
-fn connect_master(replicaof: Option<Replicaof>) {
-    match replicaof {
-        Some(master) => {
-            if let Ok(mut stream) = TcpStream::connect(format!("{}:{}", master.host, master.port)) {
-                let mut result = bytes::BytesMut::new() ;
-                let _ = stream.write("*1\r\n$4\r\nPING\r\n".as_bytes());
-                let _ = stream.read(result.as_mut());
-                println!("{}", String::from_utf8_lossy(result.as_ref()));
-            } else {
-                println!("Cannot connect to the master serever.")
-            }
-        },
-        None => return
+fn _send_message_to_master(stream: &mut TcpStream, message: String) -> Result<String, String> {
+    let mut result = [0; 32];
+    stream.write_all(message.as_bytes()).unwrap();
+    if let Ok(_) = stream.flush() {
+        let _ = stream.read(result.as_mut());
+        let response = String::from_utf8_lossy(result.as_ref()).to_string();
+        Ok(response)
+    } else {
+        Err("Cannot parse the response from server.".to_string())
+    }
+}
+
+fn ping_master(stream: &mut TcpStream) -> Result<String, String> {
+    let message = "*1\r\n$4\r\nPING\r\n";
+    _send_message_to_master(stream, message.to_string())
+}
+
+fn replicaconf_master(stream: &mut TcpStream) -> Result<String, String>{
+    let listening_port_msg = "*3\r\n$8\r\nREPLCONF\r\n$14\r\nlistening-port\r\n$4\r\n6380\r\n";
+    let capa_psync2 = "*3\r\n$8\r\nREPLCONF\r\n$4\r\ncapa\r\n$6\r\npsync2\r\n";
+
+    if let Ok(_) = _send_message_to_master(stream, listening_port_msg.to_string()) {
+        _send_message_to_master(stream, capa_psync2.to_string())
+    } else {
+        Err("Cannot configure listening port of the replica..".to_string())
     }
 }

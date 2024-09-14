@@ -27,6 +27,7 @@ pub struct Replicaof {
 pub enum ParseReplicaofError {
     #[allow(dead_code)]
     InvalidArguments,
+    #[allow(dead_code)]
     ParseIntError(ParseIntError),
 }
 
