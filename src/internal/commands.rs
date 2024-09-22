@@ -47,7 +47,8 @@ lazy_static! {
         get => get,
         set => set,
         info => info,
-        replconf => replconf
+        replconf => replconf,
+        psync => psync
     };
 }
 
@@ -59,6 +60,10 @@ pub fn run_command(
         .get(command.cmd.to_lowercase().as_str())
         .ok_or_else(|| CommandError::CommandNotFound(command.cmd))?;
     function(command.args, server_metadata)
+}
+
+fn psync(_args: Vec<String>, server_metadata: &ServerMetadata) -> Result<String, CommandError> {
+    Ok(format!("+FULLRESYNC {} {}\r\n", server_metadata.master_replid, server_metadata.master_repl_offset))
 }
 
 fn replconf(_args: Vec<String>, _server_metadata: &ServerMetadata) -> Result<String, CommandError> {
