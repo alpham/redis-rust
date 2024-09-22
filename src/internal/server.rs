@@ -68,6 +68,7 @@ fn configure_replica(replicaof: &Option<Replicaof>) {
             if let Ok(mut stream) = TcpStream::connect(format!("{}:{}", replicaof.host, replicaof.port)) {
                let _ = ping_master(&mut stream);
                let _ = replicaconf_master(&mut stream);
+               let _ = psync_master(&mut stream);
             } else {
                 return
             }
@@ -118,4 +119,9 @@ fn replicaconf_master(stream: &mut TcpStream) -> Result<String, String>{
     } else {
         Err("Cannot configure listening port of the replica..".to_string())
     }
+}
+
+fn psync_master(stream: &mut TcpStream) -> Result<String, String> {
+    let psync_msg = "*3\r\n$5\r\nPSYNC\r\n$1\r\n?\r\n$2\r\n-1\r\n";
+    _send_message_to_master(stream, psync_msg.to_string())
 }
