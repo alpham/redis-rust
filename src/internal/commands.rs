@@ -1,9 +1,12 @@
 use std::{
     collections::HashMap,
     error::Error,
+    io::{Error as IOError, ErrorKind, Write},
     fmt::{Display, Formatter},
+    net::TcpStream,
 };
 
+use hex; 
 use crate::internal::parser::Command;
 use crate::internal::server::ServerMetadata;
 use crate::internal::storage::{DBEntry, DBEntryValueType, STORAGE};
@@ -30,7 +33,7 @@ impl Display for CommandError {
     }
 }
 
-type CommandFn = fn(Vec<String>, &ServerMetadata) -> Result<String, CommandError>;
+type CommandFn = fn(&mut TcpStream, &Vec<String>, &ServerMetadata) -> Result<String, CommandError>;
 macro_rules! register_commands {
     ($($name:ident => $func:ident), *) => {
         {
@@ -53,32 +56,53 @@ lazy_static! {
 }
 
 pub fn run_command(
-    command: Command,
+    stream: &mut TcpStream,
+    command: &Command,
     server_metadata: &ServerMetadata,
 ) -> Result<String, CommandError> {
     let function = COMMANDS_REGISTRY
         .get(command.cmd.to_lowercase().as_str())
-        .ok_or_else(|| CommandError::CommandNotFound(command.cmd))?;
-    function(command.args, server_metadata)
+        .ok_or_else(|| CommandError::CommandNotFound(command.cmd.clone()))?;
+    function(stream, &command.args, server_metadata)
 }
 
-fn psync(_args: Vec<String>, server_metadata: &ServerMetadata) -> Result<String, CommandError> {
-    Ok(format!("+FULLRESYNC {} {}\r\n", server_metadata.master_replid, server_metadata.master_repl_offset))
+fn psync(stream: &mut TcpStream, _args: &Vec<String>, server_metadata: &ServerMetadata) -> Result<String, CommandError> {
+    let res = format!("+FULLRESYNC {} {}\r\n", server_metadata.master_replid, server_metadata.master_repl_offset);
+    stream.write_all(res.as_bytes()).unwrap();
+    let _ = stream.flush();
+
+    let rdb_file = hex::decode("524544495330303131fa0972656469732d76657205372e322e30fa0a72656469732d62697473c040fa056374696d65c26d08bc65fa08757365642d6d656dc2b0c41000fa08616f662d62617365c000fff06e3bfec0ff5aa2")
+    .map_err(|decode_err| IOError::new(ErrorKind::InvalidData, decode_err.to_string())).unwrap();
+    
+    stream.write_all(format!("${}\r\n", rdb_file.len()).as_bytes()).unwrap();
+    stream.write_all(rdb_file.as_slice()).unwrap();
+    let _ = stream.flush();
+    Ok(res)
 }
 
-fn replconf(_args: Vec<String>, _server_metadata: &ServerMetadata) -> Result<String, CommandError> {
-    Ok("+OK\r\n".to_string())
+fn replconf(stream: &mut TcpStream, _args: &Vec<String>, _server_metadata: &ServerMetadata) -> Result<String, CommandError> {
+    let res = "+OK\r\n".to_string();
+    stream.write_all(res.as_bytes()).unwrap();
+    let _ = stream.flush();
+    
+    Ok(res)
 }
 
-fn ping(_args: Vec<String>, _server_metadata: &ServerMetadata) -> Result<String, CommandError> {
-    Ok("+PONG\r\n".to_string())
+fn ping(stream: &mut TcpStream, _args: &Vec<String>, _server_metadata: &ServerMetadata) -> Result<String, CommandError> {
+    let res = "+PONG\r\n".to_string();
+    stream.write_all(res.as_bytes()).unwrap();
+    let _ = stream.flush();
+    Ok(res)
 }
 
-fn echo(args: Vec<String>, _server_metadata: &ServerMetadata) -> Result<String, CommandError> {
-    Ok(format!("+{}\r\n", args.get(0).unwrap()).to_string())
+fn echo(stream: &mut TcpStream, args: &Vec<String>, _server_metadata: &ServerMetadata) -> Result<String, CommandError> {
+    let res = format!("+{}\r\n", args.get(0).unwrap()).to_string();
+    stream.write_all(res.as_bytes()).unwrap();
+    let _ = stream.flush();
+    Ok(res)
 }
 
-fn set(args: Vec<String>, _server_metadata: &ServerMetadata) -> Result<String, CommandError> {
+fn set(stream: &mut TcpStream, args: &Vec<String>, _server_metadata: &ServerMetadata) -> Result<String, CommandError> {
     let key = args.get(0).unwrap();
     let value = args
         .get(1)
@@ -90,31 +114,38 @@ fn set(args: Vec<String>, _server_metadata: &ServerMetadata) -> Result<String, C
         }
     }
     STORAGE.lock().unwrap().insert(key.to_string(), db_entry);
-    Ok("+OK\r\n".to_string())
+    let res = "+OK\r\n".to_string();
+    stream.write_all(res.as_bytes()).unwrap();
+    let _ = stream.flush();
+    Ok(res)
 }
 
-fn get(args: Vec<String>, _server_metadata: &ServerMetadata) -> Result<String, CommandError> {
+fn get(stream: &mut TcpStream, args: &Vec<String>, _server_metadata: &ServerMetadata) -> Result<String, CommandError> {
     let key = args.get(0).unwrap();
     match STORAGE.lock().unwrap().get(key) {
         Some(val) => {
             let res = format_result(val);
+            stream.write_all(res.as_bytes()).unwrap();
+            let _ = stream.flush();
             Ok(res)
         }
         None => Err(CommandError::StorageError("$-1\r\n".to_string())),
     }
 }
 
-fn info(args: Vec<String>, server_metadata: &ServerMetadata) -> Result<String, CommandError> {
+fn info(stream: &mut TcpStream, args: &Vec<String>, server_metadata: &ServerMetadata) -> Result<String, CommandError> {
     let info_section = args.get(0).unwrap();
     let response = String::new();
     if info_section == "replication" {
         match server_info::get_server_info(server_metadata) {
             Ok(res) => {
-                return Ok(res);
-            },
+                stream.write_all(res.as_bytes()).unwrap();
+                let _ = stream.flush();
+            }
             Err(_) => return Err(CommandError::ErrorWhileExecution("Cannot return replication info".to_string()))
         }
     }
+
     Ok(response)
 }
 

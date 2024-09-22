@@ -85,11 +85,9 @@ fn handle_client(mut stream: TcpStream, server_metadata: Arc<ServerMetadata>) {
             continue;
         }
         let command = parser::parse_request(&buf).unwrap();
-        let result = match commands::run_command(command, metadata) {
-            Ok(res) => res,
-            Err(e) => format!("+{}\r\n", e),
+        if let Err(command_err) = commands::run_command(&mut stream, &command, metadata) {
+            stream.write_all(format!("+{}\r\n", command_err).as_bytes()).unwrap();
         };
-        stream.write_all(result.as_bytes()).unwrap();
     }
 }
 
