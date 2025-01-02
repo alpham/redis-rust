@@ -1,19 +1,26 @@
 use crate::internal::{commands, parser};
-use std::{
-    error::Error,
-    io::{Read, Write},
-    net::{TcpListener, TcpStream},
-    sync::Arc,
-    thread,
-};
+use std::{error::Error, sync::Arc};
 
 use super::cli::Replicaof;
+use tokio::{
+    io::{AsyncReadExt, AsyncWriteExt},
+    net::{TcpListener, TcpStream},
+    sync::Mutex,
+};
+
+#[derive(Debug)]
+pub struct ReplicaInfo {
+    pub _port: u16,
+    pub _host: String,
+    pub _connection: Option<TcpStream>,
+}
 
 #[derive(Debug)]
 pub struct ServerMetadata {
     pub role: u8,
     pub master_replid: String,
     pub master_repl_offset: u8,
+    pub _replicas: Arc<Mutex<Vec<ReplicaInfo>>>,
     _port: u16,
     _host: String,
 }
@@ -26,14 +33,14 @@ fn get_master_repl_offset() -> u8 {
     0
 }
 
-pub fn start_server(
+pub async fn start_server(
     host: &str,
     port: u16,
     replicaof: Option<Replicaof>,
 ) -> Result<(), Box<dyn Error>> {
     let address = format!("{}:{}", host, port);
-    let listener = TcpListener::bind(address).unwrap();
-    let metadata = Arc::new(ServerMetadata {
+    let listener = TcpListener::bind(address).await?;
+    let metadata = Arc::new(Mutex::new(ServerMetadata {
         _port: port,
         _host: host.to_string(),
 
@@ -43,59 +50,74 @@ pub fn start_server(
             Some(_) => 1,
             None => 0,
         },
-    });
+        _replicas: Arc::new(Mutex::new(Vec::new())),
+    }));
 
     // Configuring the replica.
-    configure_replica(&replicaof);
+    configure_replica(&replicaof).await;
 
-    for stream in listener.incoming() {
+    while let Ok((stream, _)) = listener.accept().await {
         let cloned_metadata = Arc::clone(&metadata);
-        thread::spawn(|| match stream {
-            Ok(stream) => {
-                handle_client(stream, cloned_metadata);
-            }
-            Err(e) => {
-                eprintln!("error: {}", e);
-            }
+
+        tokio::spawn(async move {
+            handle_client(stream, cloned_metadata).await;
         });
     }
     Ok(())
 }
 
-fn configure_replica(replicaof: &Option<Replicaof>) {
+async fn configure_replica(replicaof: &Option<Replicaof>) {
     match replicaof {
         Some(replicaof) => {
-            if let Ok(mut stream) = TcpStream::connect(format!("{}:{}", replicaof.host, replicaof.port)) {
-               let _ = ping_master(&mut stream);
-               let _ = replicaconf_master(&mut stream);
-               let _ = psync_master(&mut stream);
+            if let Ok(mut stream) =
+                TcpStream::connect(format!("{}:{}", replicaof.host, replicaof.port)).await
+            {
+                let _ = ping_master(&mut stream).await;
+                let _ = replicaconf_master(&mut stream).await;
+                let _ = psync_master(&mut stream).await;
+                let _ = stream.flush().await;
             } else {
-                return
+                return;
             }
-        },
-        None => return
+        }
+        None => return,
     }
 }
 
-fn handle_client(mut stream: TcpStream, server_metadata: Arc<ServerMetadata>) {
+async fn handle_client(stream: TcpStream, server_metadata: Arc<Mutex<ServerMetadata>>) {
     let mut buf = [0u8; 255];
     let metadata = &*server_metadata;
-    while let Ok(count) = stream.read(&mut buf) {
-        if count == 0 {
-            continue;
+    let stream = Arc::new(Mutex::new(stream));
+    loop {
+        let mut locked_stream = stream.lock().await;
+        match locked_stream.read(&mut buf).await {
+            Ok(0) => continue,
+            Ok(_) => {
+                drop(locked_stream);
+                let command = parser::parse_request(&buf).unwrap();
+                let stream_clone = Arc::clone(&stream);
+                if let Err(command_err) =
+                    commands::run_command(stream_clone, &command, metadata).await
+                {
+                    let mut stream_lock = stream.lock().await;
+                    let _ = stream_lock
+                        .write_all(format!("+{}\r\n", command_err).as_bytes())
+                        .await;
+                };
+            }
+            Err(_) => break,
         }
-        let command = parser::parse_request(&buf).unwrap();
-        if let Err(command_err) = commands::run_command(&mut stream, &command, metadata) {
-            stream.write_all(format!("+{}\r\n", command_err).as_bytes()).unwrap();
-        };
     }
 }
 
-fn _send_message_to_master(stream: &mut TcpStream, message: String) -> Result<String, String> {
+async fn _send_message_to_master(
+    stream: &mut TcpStream,
+    message: String,
+) -> Result<String, String> {
     let mut result = [0; 32];
-    stream.write_all(message.as_bytes()).unwrap();
-    if let Ok(_) = stream.flush() {
-        let _ = stream.read(result.as_mut());
+    let _ = stream.write_all(message.as_bytes()).await;
+    if let Ok(_) = stream.flush().await {
+        let _ = stream.read(result.as_mut()).await;
         let response = String::from_utf8_lossy(result.as_ref()).to_string();
         Ok(response)
     } else {
@@ -103,23 +125,23 @@ fn _send_message_to_master(stream: &mut TcpStream, message: String) -> Result<St
     }
 }
 
-fn ping_master(stream: &mut TcpStream) -> Result<String, String> {
+async fn ping_master(stream: &mut TcpStream) -> Result<String, String> {
     let message = "*1\r\n$4\r\nPING\r\n";
-    _send_message_to_master(stream, message.to_string())
+    _send_message_to_master(stream, message.to_string()).await
 }
 
-fn replicaconf_master(stream: &mut TcpStream) -> Result<String, String>{
+async fn replicaconf_master(stream: &mut TcpStream) -> Result<String, String> {
     let listening_port_msg = "*3\r\n$8\r\nREPLCONF\r\n$14\r\nlistening-port\r\n$4\r\n6380\r\n";
     let capa_psync2 = "*3\r\n$8\r\nREPLCONF\r\n$4\r\ncapa\r\n$6\r\npsync2\r\n";
 
-    if let Ok(_) = _send_message_to_master(stream, listening_port_msg.to_string()) {
-        _send_message_to_master(stream, capa_psync2.to_string())
+    if let Ok(_) = _send_message_to_master(stream, listening_port_msg.to_string()).await {
+        _send_message_to_master(stream, capa_psync2.to_string()).await
     } else {
         Err("Cannot configure listening port of the replica..".to_string())
     }
 }
 
-fn psync_master(stream: &mut TcpStream) -> Result<String, String> {
+async fn psync_master(stream: &mut TcpStream) -> Result<String, String> {
     let psync_msg = "*3\r\n$5\r\nPSYNC\r\n$1\r\n?\r\n$2\r\n-1\r\n";
-    _send_message_to_master(stream, psync_msg.to_string())
+    _send_message_to_master(stream, psync_msg.to_string()).await
 }

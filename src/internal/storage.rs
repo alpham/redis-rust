@@ -2,10 +2,9 @@ use core::str;
 use std::{
     collections::HashMap,
     fmt::Display,
-    sync::Mutex,
     time::{Duration, SystemTime},
 };
-
+use tokio::sync::Mutex;
 use crate::internal::commands::CommandError::StorageError;
 
 use super::commands::CommandError;
