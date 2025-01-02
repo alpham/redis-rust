@@ -1,6 +1,7 @@
 pub struct Command {
     pub cmd: String,
     pub args: Vec<String>,
+    pub raw_cmd: String,
 }
 
 pub fn parse_request(buf: &[u8]) -> Result<Command, String> {
@@ -20,5 +21,9 @@ pub fn parse_request(buf: &[u8]) -> Result<Command, String> {
         args.push(arg);
     }
 
-    Ok(Command { cmd, args })
+    Ok(Command {
+        cmd,
+        args,
+        raw_cmd: body,
+    })
 }

@@ -5,22 +5,15 @@ use super::cli::Replicaof;
 use tokio::{
     io::{AsyncReadExt, AsyncWriteExt},
     net::{TcpListener, TcpStream},
-    sync::Mutex,
+    sync::{broadcast, Mutex, RwLock},
 };
-
-#[derive(Debug)]
-pub struct ReplicaInfo {
-    pub _port: u16,
-    pub _host: String,
-    pub _connection: Option<TcpStream>,
-}
 
 #[derive(Debug)]
 pub struct ServerMetadata {
     pub role: u8,
     pub master_replid: String,
     pub master_repl_offset: u8,
-    pub _replicas: Arc<Mutex<Vec<ReplicaInfo>>>,
+    pub broadcast: broadcast::Sender<Arc<Vec<u8>>>,
     _port: u16,
     _host: String,
 }
@@ -40,7 +33,7 @@ pub async fn start_server(
 ) -> Result<(), Box<dyn Error>> {
     let address = format!("{}:{}", host, port);
     let listener = TcpListener::bind(address).await?;
-    let metadata = Arc::new(Mutex::new(ServerMetadata {
+    let metadata = Arc::new(RwLock::new(ServerMetadata {
         _port: port,
         _host: host.to_string(),
 
@@ -50,7 +43,8 @@ pub async fn start_server(
             Some(_) => 1,
             None => 0,
         },
-        _replicas: Arc::new(Mutex::new(Vec::new())),
+        // The `0` here is to get the sender only, we don't need the receiver here.
+        broadcast: broadcast::channel(16).0,
     }));
 
     // Configuring the replica.
@@ -84,26 +78,19 @@ async fn configure_replica(replicaof: &Option<Replicaof>) {
     }
 }
 
-async fn handle_client(stream: TcpStream, server_metadata: Arc<Mutex<ServerMetadata>>) {
+async fn handle_client(stream: TcpStream, server_metadata: Arc<RwLock<ServerMetadata>>) {
     let mut buf = [0u8; 255];
-    let metadata = &*server_metadata;
+    // let metadata = &*server_metadata;
     let stream = Arc::new(Mutex::new(stream));
     loop {
         let mut locked_stream = stream.lock().await;
         match locked_stream.read(&mut buf).await {
             Ok(0) => continue,
-            Ok(_) => {
+            Ok(length) => {
                 drop(locked_stream);
-                let command = parser::parse_request(&buf).unwrap();
+                let command = parser::parse_request(&buf[..length]).unwrap();
                 let stream_clone = Arc::clone(&stream);
-                if let Err(command_err) =
-                    commands::run_command(stream_clone, &command, metadata).await
-                {
-                    let mut stream_lock = stream.lock().await;
-                    let _ = stream_lock
-                        .write_all(format!("+{}\r\n", command_err).as_bytes())
-                        .await;
-                };
+                commands::run_command(stream_clone, command, &server_metadata).await
             }
             Err(_) => break,
         }

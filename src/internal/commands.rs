@@ -5,7 +5,7 @@ use std::{
     future::Future,
     io::{Error as IOError, ErrorKind},
     pin::Pin,
-    sync::Arc,
+    sync::Arc
 };
 
 use crate::internal::parser::Command;
@@ -13,14 +13,18 @@ use crate::internal::server::ServerMetadata;
 use crate::internal::server_info;
 use crate::internal::storage::{DBEntry, DBEntryValueType, STORAGE};
 use hex;
-use tokio::{io::AsyncWriteExt, net::TcpStream, sync::Mutex};
+use tokio::{
+    io::AsyncWriteExt,
+    net::TcpStream,
+    sync::{broadcast, Mutex, RwLock},
+};
 
 #[derive(Debug)]
 pub enum CommandError {
     CommandNotFound(String),
     InvalidArgument(String),
     StorageError(String),
-    ErrorWhileExecution(String),
+    _ErrorWhileExecution(String),
 }
 
 impl Error for CommandError {}
@@ -31,7 +35,7 @@ impl Display for CommandError {
             CommandError::CommandNotFound(cmd) => write!(f, "Command not found: {}", cmd),
             CommandError::InvalidArgument(msg) => write!(f, "Invalid arguments: {}", msg),
             CommandError::StorageError(msg) => write!(f, "Storage error: {}", msg),
-            CommandError::ErrorWhileExecution(msg) => {
+            CommandError::_ErrorWhileExecution(msg) => {
                 write!(f, "Error while executing the command: {}", msg)
             }
         }
@@ -41,10 +45,9 @@ impl Display for CommandError {
 type CommandFn = Arc<
     dyn for<'a> Fn(
             Arc<Mutex<TcpStream>>,
-            &'a Vec<String>,
-            &'a Mutex<ServerMetadata>,
-        )
-            -> Pin<Box<dyn Future<Output = Result<String, CommandError>> + Send + 'a>>
+            Command,
+            &'a Arc<RwLock<ServerMetadata>>,
+        ) -> Pin<Box<dyn Future<Output = ()> + Send + 'a>>
         + Send
         + Sync,
 >;
@@ -56,7 +59,7 @@ macro_rules! register_commands {
             $(
                 m.insert(
                     stringify!($name),
-                    Arc::new(move |stream, args, metadata| Box::pin($func(stream, args, metadata)))
+                    Arc::new(move |stream, command, metadata| Box::pin($func(stream, command, metadata)))
                 );
             )*
             m
@@ -78,22 +81,25 @@ lazy_static! {
 
 pub async fn run_command(
     stream: Arc<Mutex<TcpStream>>,
-    command: &Command,
-    server_metadata: &Mutex<ServerMetadata>,
-) -> Result<String, CommandError> {
-    let function = COMMANDS_REGISTRY
+    command: Command,
+    server_metadata: &Arc<RwLock<ServerMetadata>>,
+) {
+    match COMMANDS_REGISTRY
         .get(command.cmd.to_lowercase().as_str())
-        .ok_or_else(|| CommandError::CommandNotFound(command.cmd.clone()))?;
-    function(stream, &command.args, server_metadata).await
+        .ok_or_else(|| CommandError::CommandNotFound(command.cmd.clone()))
+    {
+        Ok(function) => function(stream, command, server_metadata).await,
+        Err(_) => eprintln!("Cannot find function with name \"{}\"", command.cmd),
+    }
 }
 
 async fn psync(
     arc_stream: Arc<Mutex<TcpStream>>,
-    _args: &Vec<String>,
-    server_metadata: &Mutex<ServerMetadata>,
-) -> Result<String, CommandError> {
+    _command: Command,
+    server_metadata: &Arc<RwLock<ServerMetadata>>,
+) {
     let mut stream = arc_stream.lock().await;
-    let metadata = server_metadata.lock().await;
+    let metadata = server_metadata.read().await;
     let res = format!(
         "+FULLRESYNC {} {}\r\n",
         metadata.master_replid, metadata.master_repl_offset
@@ -109,115 +115,93 @@ async fn psync(
         .await;
     let _ = stream.write_all(rdb_file.as_slice()).await;
     let _ = stream.flush().await;
-    Ok(res)
+    loop {
+        let mut receiver = metadata.broadcast.subscribe();
+        let result = receiver.recv().await.unwrap();
+        let _ = stream.write_all(result.as_slice()).await;
+        let _ = stream.flush().await;
+    }
 }
 
 async fn replconf(
     arc_stream: Arc<Mutex<TcpStream>>,
-    _args: &Vec<String>,
-    _server_metadata: &Mutex<ServerMetadata>,
-) -> Result<String, CommandError> {
+    _command: Command,
+    _server_metadata: &Arc<RwLock<ServerMetadata>>,
+) {
     let res = "+OK\r\n".to_string();
     let mut stream = arc_stream.lock().await;
     let _ = stream.write_all(res.as_bytes()).await;
     let _ = stream.flush().await;
-
-    Ok(res)
 }
 
 async fn ping(
     arc_stream: Arc<Mutex<TcpStream>>,
-    _args: &Vec<String>,
-    _server_metadata: &Mutex<ServerMetadata>,
-) -> Result<String, CommandError> {
+    _command: Command,
+    _server_metadata: &Arc<RwLock<ServerMetadata>>,
+) {
     let res = "+PONG\r\n".to_string();
     let mut stream = arc_stream.lock().await;
     let _ = stream.write_all(res.as_bytes()).await;
     let _ = stream.flush().await;
-    Ok(res)
 }
 
 async fn echo(
     arc_stream: Arc<Mutex<TcpStream>>,
-    args: &Vec<String>,
-    _server_metadata: &Mutex<ServerMetadata>,
-) -> Result<String, CommandError> {
+    command: Command,
+    _server_metadata: &Arc<RwLock<ServerMetadata>>,
+) {
+    let args = command.args;
     let res = format!("+{}\r\n", args.get(0).unwrap()).to_string();
     let mutex_stream = &*arc_stream;
     let mut stream = mutex_stream.lock().await;
     let _ = stream.write_all(res.as_bytes()).await;
     let _ = stream.flush().await;
-    Ok(res)
 }
 
 async fn set(
     arc_stream: Arc<Mutex<TcpStream>>,
-    args: &Vec<String>,
-    server_metadata: &Mutex<ServerMetadata>,
-) -> Result<String, CommandError> {
+    command: Command,
+    server_metadata: &Arc<RwLock<ServerMetadata>>,
+) {
+    let metadata = server_metadata.read().await;
+    let args = command.args;
     let key = args.get(0).unwrap();
-    let value = args
+    match args
         .get(1)
-        .ok_or_else(|| CommandError::InvalidArgument("Missing arguments".to_string()))?;
-    let mut db_entry = DBEntry::from_string(value, DBEntryValueType::StringType);
-    if args.len() > 2 {
-        if args[2] == "px".to_string() {
-            db_entry.set_ttl(args.get(3))?;
+        .ok_or_else(|| CommandError::InvalidArgument("Missing arguments".to_string()))
+    {
+        Ok(value) => {
+            let mut db_entry = DBEntry::from_string(value, DBEntryValueType::StringType);
+            if args.len() > 2 {
+                if args[2] == "px".to_string() {
+                    let _ = db_entry.set_ttl(args.get(3));
+                }
+            }
+            let mut storage = STORAGE.lock().await;
+            storage.insert(key.to_string(), db_entry);
+            let res = "+OK\r\n".to_string();
+            let mut stream = arc_stream.lock().await;
+            let _ = stream.write_all(res.as_bytes()).await;
+            let _ = stream.flush().await;
+            _sync_replicas(command.raw_cmd, &metadata.broadcast).await;
         }
+        Err(_) => eprintln!("Error setting a value"),
     }
-    let mut storage = STORAGE.lock().await;
-    storage.insert(key.to_string(), db_entry);
-    let metadata = &*server_metadata.lock().await;
-    let _ = _sync_replicas("SET", args, metadata);
-    let res = "+OK\r\n".to_string();
-    let mut stream = arc_stream.lock().await;
-    let _ = stream.write_all(res.as_bytes()).await;
-    let _ = stream.flush().await;
-    Ok(res)
 }
 
-async fn _sync_replicas(
-    _cmd: &str,
-    _args: &Vec<String>,
-    _server_metadata: &ServerMetadata,
-) -> Result<String, CommandError> {
-    // TODO: iterate all the replicas and send the same command to them.
-    // let replicas = server_metadata.replicas.lock().await;
-    // for replica in replicas.iter() {
-    //     let mut command = String::from(format!(
-    //         "*{}\\r\\n${}\\r\\n{}\\r\\n",
-    //         args.len() + 1,
-    //         cmd.len(),
-    //         cmd
-    //     ));
-    //     for arg in args {
-    //         command.push_str(format!("${}\\r\\n{}\\r\\n", arg.len(), arg).as_str());
-    //     }
-    //     println!("trying to connect to {}:{}", replica.host, replica.port);
-    //     if let Ok(mut stream) =
-    //         TcpStream::connect(format!("{}:{}", replica.host, replica.port)).await
-    //     {
-    //         stream.write_all(command.as_bytes()).await;
-    //         let mut buffer = [0; 512];
-    //         let bytes_read = stream.read(&mut buffer).await;
-    //         println!(
-    //             "Replica {}:{} responded with {}",
-    //             replica.host,
-    //             replica.port,
-    //             String::from_utf8_lossy(&buffer[..bytes_read])
-    //         );
-    //     } else {
-    //         println!("{}:{} cannot be synced", replica.host, replica.port);
-    //     }
-    // }
-    Ok("".to_string())
+async fn _sync_replicas(raw_command: String, sender: &broadcast::Sender<Arc<Vec<u8>>>) {
+    if sender.receiver_count() > 0 {
+        let v = Arc::new(raw_command.into_bytes());
+        let _ = sender.send(v);
+    }
 }
 
 async fn get(
     arc_stream: Arc<Mutex<TcpStream>>,
-    args: &Vec<String>,
-    _server_metadata: &Mutex<ServerMetadata>,
-) -> Result<String, CommandError> {
+    command: Command,
+    _server_metadata: &Arc<RwLock<ServerMetadata>>,
+) {
+    let args = command.args;
     let key = args.get(0).unwrap();
     let mut stream = arc_stream.lock().await;
     let storage = STORAGE.lock().await;
@@ -226,21 +210,20 @@ async fn get(
             let res = format_result(val);
             let _ = stream.write_all(res.as_bytes()).await;
             let _ = stream.flush();
-            Ok(res)
         }
-        None => Err(CommandError::StorageError("$-1\r\n".to_string())),
+        None => eprintln!("$-1\r\n"),
     }
 }
 
 async fn info(
     arc_stream: Arc<Mutex<TcpStream>>,
-    args: &Vec<String>,
-    server_metadata: &Mutex<ServerMetadata>,
-) -> Result<String, CommandError> {
+    command: Command,
+    server_metadata: &Arc<RwLock<ServerMetadata>>,
+) {
+    let args = command.args;
     let info_section = args.get(0).unwrap();
-    let response = String::new();
     let mut stream = arc_stream.lock().await;
-    let metadata = server_metadata.lock().await;
+    let metadata = server_metadata.read().await;
     if info_section == "replication" {
         match server_info::get_server_info(&metadata) {
             Ok(res) => {
@@ -248,14 +231,10 @@ async fn info(
                 let _ = stream.flush();
             }
             Err(_) => {
-                return Err(CommandError::ErrorWhileExecution(
-                    "Cannot return replication info".to_string(),
-                ))
+                eprintln!("Cannot return replication info");
             }
         }
     }
-
-    Ok(response)
 }
 
 fn format_result(value: &DBEntry) -> String {
