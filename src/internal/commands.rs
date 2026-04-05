@@ -16,7 +16,7 @@ use hex;
 use tokio::{
     io::AsyncWriteExt,
     net::TcpStream,
-    sync::{broadcast, Mutex, RwLock},
+    sync::{broadcast, RwLock},
 };
 
 #[derive(Debug)]
@@ -42,9 +42,9 @@ impl Display for CommandError {
     }
 }
 
-type CommandFn = Arc<
+pub type CommandFn = Arc<
     dyn for<'a> Fn(
-            Arc<Mutex<TcpStream>>,
+            Arc<RwLock<TcpStream>>,
             Command,
             &'a Arc<RwLock<ServerMetadata>>,
         ) -> Pin<Box<dyn Future<Output = ()> + Send + 'a>>
@@ -52,12 +52,24 @@ type CommandFn = Arc<
         + Sync,
 >;
 
+#[derive(Default)]
+pub struct CommandsReg {
+    commands: HashMap<&'static str, CommandFn>,
+}
+
+impl PartialEq for CommandsReg {
+    fn eq(&self, other:&Self) -> bool {
+        self.commands.keys().eq(other.commands.keys())
+    }
+}
+
+
 macro_rules! register_commands {
     ($($name:ident => $func:ident),* $(,)?) => {
         {
-            let mut m: HashMap<&'static str, CommandFn> = HashMap::new();
+            let mut m: CommandsReg = CommandsReg::default();
             $(
-                m.insert(
+                m.commands.insert(
                     stringify!($name),
                     Arc::new(move |stream, command, metadata| Box::pin($func(stream, command, metadata)))
                 );
@@ -67,8 +79,15 @@ macro_rules! register_commands {
     };
 }
 
+
 lazy_static! {
-    static ref COMMANDS_REGISTRY: HashMap<&'static str, CommandFn> = register_commands! {
+    pub static ref MASTER_REPLICA_COMMANDS: CommandsReg = register_commands! {
+        set => set
+    };
+}
+
+lazy_static! {
+    pub static ref COMMANDS_REGISTRY: CommandsReg = register_commands! {
         ping => ping,
         echo => echo,
         get => get,
@@ -80,11 +99,12 @@ lazy_static! {
 }
 
 pub async fn run_command(
-    stream: Arc<Mutex<TcpStream>>,
+    stream: Arc<RwLock<TcpStream>>,
     command: Command,
     server_metadata: &Arc<RwLock<ServerMetadata>>,
+    command_reg: &CommandsReg,
 ) {
-    match COMMANDS_REGISTRY
+    match command_reg.commands
         .get(command.cmd.to_lowercase().as_str())
         .ok_or_else(|| CommandError::CommandNotFound(command.cmd.clone()))
     {
@@ -94,11 +114,11 @@ pub async fn run_command(
 }
 
 async fn psync(
-    arc_stream: Arc<Mutex<TcpStream>>,
+    arc_stream: Arc<RwLock<TcpStream>>,
     _command: Command,
     server_metadata: &Arc<RwLock<ServerMetadata>>,
 ) {
-    let mut stream = arc_stream.lock().await;
+    let mut stream = arc_stream.write().await;
     let metadata = server_metadata.read().await;
     let res = format!(
         "+FULLRESYNC {} {}\r\n",
@@ -124,42 +144,41 @@ async fn psync(
 }
 
 async fn replconf(
-    arc_stream: Arc<Mutex<TcpStream>>,
+    stream: Arc<RwLock<TcpStream>>,
     _command: Command,
     _server_metadata: &Arc<RwLock<ServerMetadata>>,
 ) {
     let res = "+OK\r\n".to_string();
-    let mut stream = arc_stream.lock().await;
+    let mut stream = stream.write().await;
     let _ = stream.write_all(res.as_bytes()).await;
     let _ = stream.flush().await;
 }
 
 async fn ping(
-    arc_stream: Arc<Mutex<TcpStream>>,
+    stream: Arc<RwLock<TcpStream>>,
     _command: Command,
     _server_metadata: &Arc<RwLock<ServerMetadata>>,
 ) {
     let res = "+PONG\r\n".to_string();
-    let mut stream = arc_stream.lock().await;
+    let mut stream = stream.write().await;
     let _ = stream.write_all(res.as_bytes()).await;
     let _ = stream.flush().await;
 }
 
 async fn echo(
-    arc_stream: Arc<Mutex<TcpStream>>,
+    stream: Arc<RwLock<TcpStream>>,
     command: Command,
     _server_metadata: &Arc<RwLock<ServerMetadata>>,
 ) {
     let args = command.args;
     let res = format!("+{}\r\n", args.get(0).unwrap()).to_string();
-    let mutex_stream = &*arc_stream;
-    let mut stream = mutex_stream.lock().await;
+    let mut stream = stream.write().await;
     let _ = stream.write_all(res.as_bytes()).await;
     let _ = stream.flush().await;
 }
 
 async fn set(
-    arc_stream: Arc<Mutex<TcpStream>>,
+    stream: Arc<RwLock<TcpStream>>,
     command: Command,
     server_metadata: &Arc<RwLock<ServerMetadata>>,
 ) {
@@ -180,7 +199,7 @@ async fn set(
             let mut storage = STORAGE.lock().await;
             storage.insert(key.to_string(), db_entry);
             let res = "+OK\r\n".to_string();
-            let mut stream = arc_stream.lock().await;
+            let mut stream = stream.write().await;
             let _ = stream.write_all(res.as_bytes()).await;
             let _ = stream.flush().await;
             _sync_replicas(command.raw_cmd, &metadata.broadcast).await;
@@ -197,13 +216,13 @@ async fn _sync_replicas(raw_command: String, sender: &broadcast::Sender<Arc<Vec<
 }
 
 async fn get(
-    arc_stream: Arc<Mutex<TcpStream>>,
+    stream: Arc<RwLock<TcpStream>>,
     command: Command,
     _server_metadata: &Arc<RwLock<ServerMetadata>>,
 ) {
     let args = command.args;
     let key = args.get(0).unwrap();
-    let mut stream = arc_stream.lock().await;
+    let mut stream = stream.write().await;
     let storage = STORAGE.lock().await;
     match storage.get(key) {
         Some(val) => {
@@ -216,13 +235,13 @@ async fn get(
 }
 
 async fn info(
-    arc_stream: Arc<Mutex<TcpStream>>,
+    stream: Arc<RwLock<TcpStream>>,
     command: Command,
     server_metadata: &Arc<RwLock<ServerMetadata>>,
 ) {
     let args = command.args;
     let info_section = args.get(0).unwrap();
-    let mut stream = arc_stream.lock().await;
+    let mut stream = stream.write().await;
     let metadata = server_metadata.read().await;
     if info_section == "replication" {
         match server_info::get_server_info(&metadata) {

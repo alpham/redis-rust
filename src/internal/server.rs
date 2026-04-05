@@ -5,7 +5,7 @@ use super::cli::Replicaof;
 use tokio::{
     io::{AsyncReadExt, AsyncWriteExt},
     net::{TcpListener, TcpStream},
-    sync::{broadcast, Mutex, RwLock},
+    sync::{broadcast, RwLock},
 };
 
 #[derive(Debug)]
@@ -48,49 +48,64 @@ pub async fn start_server(
     }));
 
     // Configuring the replica.
-    configure_replica(&replicaof).await;
+    configure_replica(&replicaof, &metadata).await;
 
     while let Ok((stream, _)) = listener.accept().await {
         let cloned_metadata = Arc::clone(&metadata);
-
+        let stream = Arc::new(RwLock::new(stream));
         tokio::spawn(async move {
-            handle_client(stream, cloned_metadata).await;
+            handle_client(stream, &cloned_metadata, None).await;
         });
     }
     Ok(())
 }
 
-async fn configure_replica(replicaof: &Option<Replicaof>) {
-    match replicaof {
-        Some(replicaof) => {
-            if let Ok(mut stream) =
-                TcpStream::connect(format!("{}:{}", replicaof.host, replicaof.port)).await
-            {
-                let _ = ping_master(&mut stream).await;
-                let _ = replicaconf_master(&mut stream).await;
-                let _ = psync_master(&mut stream).await;
-                let _ = stream.flush().await;
-            } else {
-                return;
-            }
+async fn configure_replica(replicaof: &Option<Replicaof>, metadata: &Arc<RwLock<ServerMetadata>>) {
+    if let Some(replicaof) = replicaof {
+        if let Ok(mut stream) =
+            TcpStream::connect(format!("{}:{}", replicaof.host, replicaof.port)).await
+        {
+            let _ = ping_master(&mut stream).await;
+            let _ = replicaconf_master(&mut stream).await;
+            let _ = psync_master(&mut stream).await;
+
+            // The flush here is to ignore the database file once it's sent.
+            // TODO: handle the database file once it's sent.
+            let _ = stream.flush().await;
+
+            let stream = Arc::new(RwLock::new(stream));
+            let cloned_metadata = Arc::clone(metadata);
+
+            tokio::spawn(async move {
+                handle_client(
+                    stream,
+                    &cloned_metadata,
+                    Some(&commands::MASTER_REPLICA_COMMANDS),
+                )
+                .await;
+            });
         }
-        None => return,
     }
 }
 
-async fn handle_client(stream: TcpStream, server_metadata: Arc<RwLock<ServerMetadata>>) {
+async fn handle_client(
+    stream: Arc<RwLock<TcpStream>>,
+    server_metadata: &Arc<RwLock<ServerMetadata>>,
+    command_registry: Option<&commands::CommandsReg>,
+) {
     let mut buf = [0u8; 255];
-    // let metadata = &*server_metadata;
-    let stream = Arc::new(Mutex::new(stream));
+    let command_reg = command_registry.unwrap_or(&commands::COMMANDS_REGISTRY);
     loop {
-        let mut locked_stream = stream.lock().await;
+        let mut locked_stream = stream.write().await;
         match locked_stream.read(&mut buf).await {
             Ok(0) => continue,
             Ok(length) => {
                 drop(locked_stream);
-                let command = parser::parse_request(&buf[..length]).unwrap();
-                let stream_clone = Arc::clone(&stream);
-                commands::run_command(stream_clone, command, &server_metadata).await
+                let commands = parser::parse_request(&buf[..length]).unwrap();
+                for command in commands {
+                    let stream_clone = Arc::clone(&stream);
+                    commands::run_command(stream_clone, command, server_metadata, command_reg).await
+                }
             }
             Err(_) => break,
         }
@@ -106,6 +121,7 @@ async fn _send_message_to_master(
     if let Ok(_) = stream.flush().await {
         let _ = stream.read(result.as_mut()).await;
         let response = String::from_utf8_lossy(result.as_ref()).to_string();
+        let _ = stream.flush().await;
         Ok(response)
     } else {
         Err("Cannot parse the response from server.".to_string())
