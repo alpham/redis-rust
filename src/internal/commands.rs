@@ -98,6 +98,7 @@ lazy_static! {
         psync => psync,
         replconf => replconf,
         set => set,
+        wait => wait,
     };
 }
 
@@ -118,30 +119,30 @@ pub async fn run_command(
 }
 
 async fn psync(
-    arc_stream: Arc<RwLock<TcpStream>>,
+    stream: Arc<RwLock<TcpStream>>,
     _command: Command,
     server_metadata: &Arc<RwLock<ServerMetadata>>,
 ) {
-    let mut stream = arc_stream.write().await;
+    let mut stream_writer = stream.write().await;
     let metadata = server_metadata.read().await;
     let repl_offset = metadata.master_repl_offset.load(Ordering::SeqCst);
     let res = format!("+FULLRESYNC {} {}\r\n", metadata.master_replid, repl_offset);
-    let _ = stream.write_all(res.as_bytes()).await;
-    let _ = stream.flush().await;
+    let _ = stream_writer.write_all(res.as_bytes()).await;
+    let _ = stream_writer.flush().await;
 
     let rdb_file = hex::decode("524544495330303131fa0972656469732d76657205372e322e30fa0a72656469732d62697473c040fa056374696d65c26d08bc65fa08757365642d6d656dc2b0c41000fa08616f662d62617365c000fff06e3bfec0ff5aa2")
     .map_err(|decode_err| IOError::new(ErrorKind::InvalidData, decode_err.to_string())).unwrap();
 
-    let _ = stream
+    let _ = stream_writer
         .write_all(format!("${}\r\n", rdb_file.len()).as_bytes())
         .await;
-    let _ = stream.write_all(rdb_file.as_slice()).await;
-    let _ = stream.flush().await;
+    let _ = stream_writer.write_all(rdb_file.as_slice()).await;
+    let _ = stream_writer.flush().await;
     loop {
         let mut receiver = metadata.broadcast.subscribe();
         let result = receiver.recv().await.unwrap();
-        let _ = stream.write_all(result.as_slice()).await;
-        let _ = stream.flush().await;
+        let _ = stream_writer.write_all(result.as_slice()).await;
+        let _ = stream_writer.flush().await;
     }
 }
 
@@ -203,9 +204,7 @@ async fn _replconf_getack(
         offset_str.len(),
         offset_str
     );
-    let mut stream = stream.write().await;
-    let _ = stream.write_all(res.as_bytes()).await;
-    let _ = stream.flush().await;
+    _write_stream_and_flush(&stream, res.as_str()).await;
     let command_size = command.raw_cmd.len() as u64;
     metadata
         .master_repl_offset
@@ -219,15 +218,25 @@ async fn ping(
 ) {
     let metadata = server_metadata.read().await;
     if metadata.role == 0 {
-        let res = "+PONG\r\n".to_string();
-        let mut stream = stream.write().await;
-        let _ = stream.write_all(res.as_bytes()).await;
-        let _ = stream.flush().await;
+        let res = "+PONG\r\n";
+        _write_stream_and_flush(&stream, res).await;
     } else if metadata.role == 1 {
         let command_size = command.raw_cmd.len() as u64;
         metadata
             .master_repl_offset
             .fetch_add(command_size, Ordering::SeqCst);
+    }
+}
+
+async fn wait(
+    stream: Arc<RwLock<TcpStream>>,
+    _command: Command,
+    server_metadata: &Arc<RwLock<ServerMetadata>>,
+) {
+    let metadata = server_metadata.read().await;
+    if metadata.role == 0 {
+        let res = format!(":{}\r\n", metadata.broadcast.receiver_count());
+        _write_stream_and_flush(&stream, res.as_str()).await;
     }
 }
 
@@ -241,10 +250,8 @@ async fn echo(
         Some(val) => val,
         None => "",
     };
-    let res = format!("${}\r\n{}\r\n", echo_arg.len(), echo_arg).to_string();
-    let mut stream = stream.write().await;
-    let _ = stream.write_all(res.as_bytes()).await;
-    let _ = stream.flush().await;
+    let res = format!("${}\r\n{}\r\n", echo_arg.len(), echo_arg);
+    _write_stream_and_flush(&stream, res.as_str()).await;
 }
 
 async fn set(
@@ -267,10 +274,8 @@ async fn set(
             let mut storage = STORAGE.lock().await;
             storage.insert(key.to_string(), db_entry);
             if metadata.role == 0 {
-                let res = "+OK\r\n".to_string();
-                let mut stream = stream.write().await;
-                let _ = stream.write_all(res.as_bytes()).await;
-                let _ = stream.flush().await;
+                let res = "+OK\r\n";
+                _write_stream_and_flush(&stream, res).await;
             }
             let command_size = command.raw_cmd.len() as u64;
             _sync_replicas(command.raw_cmd, &metadata.broadcast).await;
@@ -297,14 +302,12 @@ async fn get(
 ) {
     let args = command.args;
     let key = args.first().unwrap();
-    let mut stream = stream.write().await;
     let storage = STORAGE.lock().await;
-    let response = match storage.get(key) {
+    let res = match storage.get(key) {
         Some(val) => format_result(val),
         None => "$-1\r\n".to_string(),
     };
-    let _ = stream.write_all(response.as_bytes()).await;
-    let _ = stream.flush().await;
+    _write_stream_and_flush(&stream, res.as_str()).await;
 }
 
 async fn info(
@@ -314,13 +317,11 @@ async fn info(
 ) {
     let args = command.args;
     let info_section = args.first().unwrap();
-    let mut stream = stream.write().await;
     let metadata = server_metadata.read().await;
     if info_section == "replication" {
         match server_info::get_server_info(&metadata) {
             Ok(res) => {
-                let _ = stream.write_all(res.as_bytes()).await;
-                let _ = stream.flush().await;
+                _write_stream_and_flush(&stream, res.as_str()).await;
             }
             Err(_) => {
                 eprintln!("Cannot return replication info");
@@ -334,4 +335,16 @@ fn format_result(value: &DBEntry) -> String {
         Ok(value) => format!("${}\r\n{}\r\n", value.len(), value),
         Err(_) => "$-1\r\n".to_string(),
     }
+}
+
+async fn _write_stream_and_flush(stream: &Arc<RwLock<TcpStream>>, res: &str) {
+    let mut stream = stream.write().await;
+    let _ = stream
+        .write_all(res.as_bytes())
+        .await
+        .map_err(|e| format!("Error while writing to the stream: {}", e));
+    let _ = stream
+        .flush()
+        .await
+        .map_err(|e| format!("Error while flushing the stream: {}", e));
 }
