@@ -46,13 +46,9 @@ impl From<String> for Replicaof {
                 port: 0,
             };
         }
-        let host = parts.get(0).copied().unwrap();
+        let host = parts.first().copied().unwrap();
         let port_str = parts.get(1).copied().unwrap();
-        let port: u16 = match port_str.parse::<u16>() {
-            Ok(p) => p,
-            Err(_) => 0,
-        };
-
+        let port: u16 = port_str.parse::<u16>().unwrap_or(0);
         Replicaof {
             host: host.to_string(),
             port,
