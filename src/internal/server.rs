@@ -1,14 +1,18 @@
 use crate::internal::{commands, parser};
 use std::{
     error::Error,
-    sync::{atomic::AtomicU64, Arc},
+    io::{Error as IOError, ErrorKind},
+    sync::{
+        atomic::{AtomicU64, Ordering},
+        Arc,
+    },
 };
 
 use super::cli::Replicaof;
 use tokio::{
     io::{AsyncReadExt, AsyncWriteExt},
     net::{TcpListener, TcpStream},
-    sync::{broadcast, RwLock},
+    sync::{broadcast, Notify, RwLock},
 };
 
 #[derive(Debug)]
@@ -16,6 +20,8 @@ pub struct ServerMetadata {
     pub role: u8,
     pub master_replid: String,
     pub master_repl_offset: AtomicU64,
+    pub replica_offsets: Vec<Arc<AtomicU64>>,
+    pub ack_notify: Arc<Notify>,
     pub broadcast: broadcast::Sender<Arc<Vec<u8>>>,
     _port: u16,
     _host: String,
@@ -48,6 +54,8 @@ pub async fn start_server(
         },
         // The `0` here is to get the sender only, we don't need the receiver here.
         broadcast: broadcast::channel(16).0,
+        replica_offsets: Vec::new(),
+        ack_notify: Arc::new(Notify::new()),
     }));
 
     // Configuring the replica.
@@ -138,6 +146,7 @@ async fn handle_client(
 ) {
     let mut buf = [0u8; 255];
     let command_reg = command_registry.unwrap_or(&commands::COMMANDS_REGISTRY);
+    let mut is_psync = false;
     loop {
         let mut locked_stream = stream.write().await;
         match locked_stream.read(&mut buf).await {
@@ -146,12 +155,26 @@ async fn handle_client(
                 drop(locked_stream);
                 let commands = parser::parse_request(&buf[..length]).unwrap();
                 for command in commands {
+                    if command.cmd.to_lowercase() == "psync" {
+                        is_psync = true;
+                        break;
+                    }
                     let stream_clone = Arc::clone(&stream);
                     commands::run_command(stream_clone, command, server_metadata, command_reg).await
+                }
+                if is_psync {
+                    break;
                 }
             }
             Err(_) => break,
         }
+    }
+
+    if is_psync {
+        let tcp_stream = Arc::try_unwrap(stream)
+            .expect("Should be sole owner")
+            .into_inner();
+        psync(tcp_stream, server_metadata).await;
     }
 }
 
@@ -193,4 +216,68 @@ async fn replicaconf_master(stream: &mut TcpStream) -> Result<String, String> {
 async fn psync_master(stream: &mut TcpStream) -> Result<String, String> {
     let psync_msg = "*3\r\n$5\r\nPSYNC\r\n$1\r\n?\r\n$2\r\n-1\r\n";
     _send_message_to_master(stream, psync_msg.to_string()).await
+}
+
+async fn psync(mut stream: TcpStream, server_metadata: &Arc<RwLock<ServerMetadata>>) {
+    let replica_offset = Arc::new(AtomicU64::new(0));
+    {
+        let mut metadata = server_metadata.write().await;
+        metadata.replica_offsets.push(Arc::clone(&replica_offset));
+    }
+    let metadata = server_metadata.read().await;
+    let repl_offset = metadata.master_repl_offset.load(Ordering::SeqCst);
+    let res = format!("+FULLRESYNC {} {}\r\n", metadata.master_replid, repl_offset);
+    let _ = stream.write_all(res.as_bytes()).await;
+    let _ = stream.flush().await;
+
+    let rdb_file = hex::decode("524544495330303131fa0972656469732d76657205372e322e30fa0a72656469732d62697473c040fa056374696d65c26d08bc65fa08757365642d6d656dc2b0c41000fa08616f662d62617365c000fff06e3bfec0ff5aa2")
+    .map_err(|decode_err| IOError::new(ErrorKind::InvalidData, decode_err.to_string())).unwrap();
+
+    let _ = stream
+        .write_all(format!("${}\r\n", rdb_file.len()).as_bytes())
+        .await;
+    let _ = stream.write_all(rdb_file.as_slice()).await;
+    let _ = stream.flush().await;
+    let (read_half, write_half) = stream.into_split();
+
+    let mut receiver = metadata.broadcast.subscribe();
+
+    // Writer: forwards broadcast messages to replica.
+    tokio::spawn(async move {
+        let mut writer = write_half;
+        while let Ok(data) = receiver.recv().await {
+            let _ = writer.write_all(data.as_slice()).await;
+            let _ = writer.flush().await;
+        }
+    });
+
+    // Reader: reads ACK responses from replica.
+    let replica_offset_clone = Arc::clone(&replica_offset);
+    let ack_notify_clone = Arc::clone(&metadata.ack_notify);
+    tokio::spawn(async move {
+        let mut reader = read_half;
+        let mut buf = [0u8; 256];
+        loop {
+            match reader.read(&mut buf).await {
+                Ok(0) => break,
+                Ok(n) => {
+                    if let Ok(commands) = parser::parse_request(&buf[..n]) {
+                        for cmd in commands {
+                            if cmd.cmd.to_lowercase() == "replconf" {
+                                if let Some(offset_str) = cmd.args.get(1) {
+                                    if let Ok(offset) = offset_str.parse::<u64>() {
+                                        replica_offset_clone.store(offset, Ordering::SeqCst);
+                                        ack_notify_clone.notify_waiters();
+                                    }
+                                }
+                            }
+                        }
+                    }
+                    let data = String::from_utf8_lossy(&buf[..n]);
+                    eprintln!("Replica responded: {}", data);
+                }
+                Err(_) => break,
+            }
+        }
+    });
 }

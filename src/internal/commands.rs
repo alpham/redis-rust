@@ -3,7 +3,6 @@ use std::{
     error::Error,
     fmt::{Display, Formatter},
     future::Future,
-    io::{Error as IOError, ErrorKind},
     pin::Pin,
     sync::{atomic::Ordering, Arc},
 };
@@ -12,7 +11,6 @@ use crate::internal::parser::Command;
 use crate::internal::server::ServerMetadata;
 use crate::internal::server_info;
 use crate::internal::storage::{DBEntry, DBEntryValueType, STORAGE};
-use hex;
 use tokio::{
     io::AsyncWriteExt,
     net::TcpStream,
@@ -95,7 +93,7 @@ lazy_static! {
         get => get,
         info => info,
         ping => ping,
-        psync => psync,
+        // psync => psync,
         replconf => replconf,
         set => set,
         wait => wait,
@@ -115,34 +113,6 @@ pub async fn run_command(
     {
         Ok(function) => function(stream, command, server_metadata).await,
         Err(_) => eprintln!("Cannot find function with name \"{}\"", command.cmd),
-    }
-}
-
-async fn psync(
-    stream: Arc<RwLock<TcpStream>>,
-    _command: Command,
-    server_metadata: &Arc<RwLock<ServerMetadata>>,
-) {
-    let mut stream_writer = stream.write().await;
-    let metadata = server_metadata.read().await;
-    let repl_offset = metadata.master_repl_offset.load(Ordering::SeqCst);
-    let res = format!("+FULLRESYNC {} {}\r\n", metadata.master_replid, repl_offset);
-    let _ = stream_writer.write_all(res.as_bytes()).await;
-    let _ = stream_writer.flush().await;
-
-    let rdb_file = hex::decode("524544495330303131fa0972656469732d76657205372e322e30fa0a72656469732d62697473c040fa056374696d65c26d08bc65fa08757365642d6d656dc2b0c41000fa08616f662d62617365c000fff06e3bfec0ff5aa2")
-    .map_err(|decode_err| IOError::new(ErrorKind::InvalidData, decode_err.to_string())).unwrap();
-
-    let _ = stream_writer
-        .write_all(format!("${}\r\n", rdb_file.len()).as_bytes())
-        .await;
-    let _ = stream_writer.write_all(rdb_file.as_slice()).await;
-    let _ = stream_writer.flush().await;
-    loop {
-        let mut receiver = metadata.broadcast.subscribe();
-        let result = receiver.recv().await.unwrap();
-        let _ = stream_writer.write_all(result.as_slice()).await;
-        let _ = stream_writer.flush().await;
     }
 }
 
@@ -230,12 +200,50 @@ async fn ping(
 
 async fn wait(
     stream: Arc<RwLock<TcpStream>>,
-    _command: Command,
+    command: Command,
     server_metadata: &Arc<RwLock<ServerMetadata>>,
 ) {
     let metadata = server_metadata.read().await;
-    if metadata.role == 0 {
+    let num_replicas: usize = command
+        .args
+        .first()
+        .and_then(|s| s.parse().ok())
+        .unwrap_or(0);
+    let ms_timeout: u64 = command
+        .args
+        .get(1)
+        .and_then(|s| s.parse().ok())
+        .unwrap_or(0);
+    let target = metadata.master_repl_offset.load(Ordering::SeqCst);
+
+    if target == 0 {
         let res = format!(":{}\r\n", metadata.broadcast.receiver_count());
+        _write_stream_and_flush(&stream, res.as_str()).await;
+    } else {
+        // Broadcast REPLCONF GETACK * to all replicas
+        let getack_cmd = "*3\r\n$8\r\nREPLCONF\r\n$6\r\nGETACK\r\n$1\r\n*\r\n".to_string();
+        _sync_replicas(getack_cmd, &metadata.broadcast).await;
+
+        // Wait for responses with timeout
+        let timeout = tokio::time::sleep(tokio::time::Duration::from_millis(ms_timeout));
+        tokio::pin!(timeout);
+
+        let count = loop {
+            let c = metadata
+                .replica_offsets
+                .iter()
+                .filter(|o| o.load(Ordering::SeqCst) >= target)
+                .count();
+            if c >= num_replicas {
+                break c;
+            }
+
+            tokio::select! {
+                _ = metadata.ack_notify.notified() => continue,
+                _ = &mut timeout => break c,
+            }
+        };
+        let res = format!(":{}\r\n", count);
         _write_stream_and_flush(&stream, res.as_str()).await;
     }
 }
