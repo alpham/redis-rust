@@ -11,7 +11,14 @@ async fn main() -> Result<(), Box<dyn Error>> {
     // You can use print statements as follows for debugging, they'll be visible when running tests.
 
     let args = cli::CliArgs::parse();
-    server::start_server("127.0.0.1", args.port, args.replicaof).await?;
+    server::start_server(
+        "127.0.0.1",
+        args.port,
+        args.replicaof,
+        args.dir,
+        args.dbfilename,
+    )
+    .await?;
 
     Ok(())
 }

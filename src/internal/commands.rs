@@ -84,6 +84,7 @@ lazy_static! {
         ping => ping,
         replconf => replconf,
         set => set,
+        config => config,
     };
 }
 
@@ -93,10 +94,10 @@ lazy_static! {
         get => get,
         info => info,
         ping => ping,
-        // psync => psync,
         replconf => replconf,
         set => set,
         wait => wait,
+        config => config,
     };
 }
 
@@ -335,6 +336,31 @@ async fn info(
                 eprintln!("Cannot return replication info");
             }
         }
+    }
+}
+
+async fn config(
+    stream: Arc<RwLock<TcpStream>>,
+    command: Command,
+    server_metadata: &Arc<RwLock<ServerMetadata>>,
+) {
+    let metadata = server_metadata.read().await;
+    let operation = command.args.first().unwrap();
+    if operation.to_lowercase() == "get" {
+        let config_name = command.args.get(1).unwrap();
+        let config_val = match config_name.to_lowercase().as_str() {
+            "dir" => metadata.dir.to_string_lossy().to_string(),
+            "dbfilename" => metadata.dbfilename.clone(),
+            _ => String::new(),
+        };
+        let res = format!(
+            "*2\r\n${}\r\n{}\r\n${}\r\n{}\r\n",
+            config_name.len(),
+            config_name,
+            config_val.len(),
+            config_val
+        );
+        _write_stream_and_flush(&stream, res.as_str()).await;
     }
 }
 

@@ -1,4 +1,4 @@
-use std::num::ParseIntError;
+use std::{num::ParseIntError, path::PathBuf};
 
 use clap::Parser;
 
@@ -15,6 +15,11 @@ pub struct CliArgs {
     pub replicaof: Option<Replicaof>,
     // #[arg(long = "host", default_value = "127.0.0.1")]
     // pub host: &'cli str
+    #[arg(long = "dir", required = false)]
+    pub dir: Option<PathBuf>,
+
+    #[arg(long = "dbfilename", required = false)]
+    pub dbfilename: Option<String>,
 }
 
 #[derive(Debug, Clone)]

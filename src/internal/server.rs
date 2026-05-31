@@ -2,6 +2,7 @@ use crate::internal::{commands, parser};
 use std::{
     error::Error,
     io::{Error as IOError, ErrorKind},
+    path::PathBuf,
     sync::{
         atomic::{AtomicU64, Ordering},
         Arc,
@@ -23,6 +24,8 @@ pub struct ServerMetadata {
     pub replica_offsets: Vec<Arc<AtomicU64>>,
     pub ack_notify: Arc<Notify>,
     pub broadcast: broadcast::Sender<Arc<Vec<u8>>>,
+    pub dir: PathBuf,
+    pub dbfilename: String,
     _port: u16,
     _host: String,
 }
@@ -39,6 +42,8 @@ pub async fn start_server(
     host: &str,
     port: u16,
     replicaof: Option<Replicaof>,
+    dir: Option<PathBuf>,
+    dbfilename: Option<String>,
 ) -> Result<(), Box<dyn Error>> {
     let address = format!("{}:{}", host, port);
     let listener = TcpListener::bind(address).await?;
@@ -56,6 +61,14 @@ pub async fn start_server(
         broadcast: broadcast::channel(16).0,
         replica_offsets: Vec::new(),
         ack_notify: Arc::new(Notify::new()),
+        dir: match dir {
+            Some(d) => d,
+            None => PathBuf::new(),
+        },
+        dbfilename: match dbfilename {
+            Some(db) => db,
+            None => "".to_string(),
+        },
     }));
 
     // Configuring the replica.
