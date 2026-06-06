@@ -78,26 +78,28 @@ macro_rules! register_commands {
 
 lazy_static! {
     pub static ref MASTER_REPLICA_COMMANDS: CommandsReg = register_commands! {
+        config => config,
         echo => echo,
         get => get,
         info => info,
+        keys => keys,
         ping => ping,
         replconf => replconf,
         set => set,
-        config => config,
     };
 }
 
 lazy_static! {
     pub static ref COMMANDS_REGISTRY: CommandsReg = register_commands! {
+        config => config,
         echo => echo,
         get => get,
         info => info,
+        keys=> keys,
         ping => ping,
         replconf => replconf,
         set => set,
         wait => wait,
-        config => config,
     };
 }
 
@@ -337,6 +339,19 @@ async fn info(
             }
         }
     }
+}
+
+async fn keys(
+    stream: Arc<RwLock<TcpStream>>,
+    _command: Command,
+    _server_metadata: &Arc<RwLock<ServerMetadata>>,
+) {
+    let storage = STORAGE.lock().await;
+    let mut res = format!("*{}\r\n", storage.len());
+    for key in storage.keys() {
+        res.push_str(&format!("${}\r\n{}\r\n", key.len(), key));
+    }
+    _write_stream_and_flush(&stream, res.as_str()).await;
 }
 
 async fn config(

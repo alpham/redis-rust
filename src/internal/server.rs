@@ -1,4 +1,4 @@
-use crate::internal::{commands, parser};
+use crate::internal::{commands, parser, rdb};
 use std::{
     error::Error,
     io::{Error as IOError, ErrorKind},
@@ -73,6 +73,10 @@ pub async fn start_server(
 
     // Configuring the replica.
     configure_replica(&replicaof, &metadata).await;
+    {
+        let meta = metadata.read().await;
+        rdb::load_rdb(&meta.dir, &meta.dbfilename).await;
+    }
 
     while let Ok((stream, _)) = listener.accept().await {
         let cloned_metadata = Arc::clone(&metadata);
