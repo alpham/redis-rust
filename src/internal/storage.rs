@@ -1,3 +1,4 @@
+use crate::internal::commands::CommandError::StorageError;
 use core::str;
 use std::{
     collections::HashMap,
@@ -5,7 +6,6 @@ use std::{
     time::{Duration, SystemTime},
 };
 use tokio::sync::Mutex;
-use crate::internal::commands::CommandError::StorageError;
 
 use super::commands::CommandError;
 
@@ -26,10 +26,7 @@ impl DBEntry {
                 value: value.to_string(),
                 type_: value_type,
             },
-            metadata: DBEntryMetadata {
-                created_at: SystemTime::now(),
-                ttl: None,
-            },
+            metadata: DBEntryMetadata { expire_at: None },
         }
     }
 
@@ -45,7 +42,7 @@ impl DBEntry {
         if let Some(duration_str) = duration_str {
             if let Ok(millis) = duration_str.parse::<u64>() {
                 let duration = Duration::from_millis(millis);
-                self.metadata.ttl = Some(duration);
+                self.metadata.expire_at = Some(SystemTime::now() + duration);
                 Ok(())
             } else {
                 Err(CommandError::InvalidArgument(format!(
@@ -60,9 +57,12 @@ impl DBEntry {
         }
     }
 
+    pub fn set_expiry_at(&mut self, at: SystemTime) {
+        self.metadata.expire_at = Some(at)
+    }
+
     fn still_valid(&self) -> bool {
-        if let Some(ttl) = self.metadata.ttl {
-            let expiry_time = self.metadata.created_at + ttl;
+        if let Some(expiry_time) = self.metadata.expire_at {
             if SystemTime::now() > expiry_time {
                 return false;
             }
@@ -90,6 +90,5 @@ pub enum DBEntryValueType {
 
 #[derive(Debug, Clone, Copy)]
 pub struct DBEntryMetadata {
-    ttl: Option<Duration>,
-    created_at: SystemTime,
+    expire_at: Option<SystemTime>,
 }
