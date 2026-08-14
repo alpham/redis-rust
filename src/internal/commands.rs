@@ -86,6 +86,7 @@ lazy_static! {
         ping => ping,
         replconf => replconf,
         set => set,
+        type_fn => type_fn,
     };
 }
 
@@ -99,6 +100,7 @@ lazy_static! {
         ping => ping,
         replconf => replconf,
         set => set,
+        type_fn => type_fn,
         wait => wait,
     };
 }
@@ -109,9 +111,15 @@ pub async fn run_command(
     server_metadata: &Arc<RwLock<ServerMetadata>>,
     command_reg: &CommandsReg,
 ) {
+    let lowered = command.cmd.to_lowercase();
+    let mut cmd_key = lowered.as_str();
+    if cmd_key == "type" {
+        cmd_key = "type_fn";
+    }
+
     match command_reg
         .commands
-        .get(command.cmd.to_lowercase().as_str())
+        .get(cmd_key)
         .ok_or_else(|| CommandError::CommandNotFound(command.cmd.clone()))
     {
         Ok(function) => function(stream, command, server_metadata).await,
@@ -319,6 +327,23 @@ async fn get(
         None => "$-1\r\n".to_string(),
     };
     _write_stream_and_flush(&stream, res.as_str()).await;
+}
+
+async fn type_fn(
+    stream: Arc<RwLock<TcpStream>>,
+    command: Command,
+    _server_metadata: &Arc<RwLock<ServerMetadata>>,
+) {
+    println!("hello from type");
+    let args = command.args;
+    let key = args.first().unwrap();
+    let storage = STORAGE.lock().await;
+    let res = match storage.get(key) {
+        // TODO: read the type dynamically.
+        Some(_) => "+string\r\n",
+        None => "+none\r\n",
+    };
+    _write_stream_and_flush(&stream, res).await;
 }
 
 async fn info(
