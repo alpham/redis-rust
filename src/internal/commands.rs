@@ -7,10 +7,13 @@ use std::{
     sync::{atomic::Ordering, Arc},
 };
 
-use crate::internal::parser::Command;
 use crate::internal::server::ServerMetadata;
 use crate::internal::server_info;
-use crate::internal::storage::{DBEntry, DBEntryValueType, STORAGE};
+use crate::internal::storage::{DBEntry, STORAGE};
+use crate::internal::{
+    parser::Command,
+    types::{StreamId, StreamType},
+};
 use tokio::{
     io::AsyncWriteExt,
     net::TcpStream,
@@ -87,6 +90,7 @@ lazy_static! {
         replconf => replconf,
         set => set,
         type_fn => type_fn,
+        xadd => xadd,
     };
 }
 
@@ -102,6 +106,7 @@ lazy_static! {
         set => set,
         type_fn => type_fn,
         wait => wait,
+        xadd => xadd,
     };
 }
 
@@ -286,7 +291,7 @@ async fn set(
         .ok_or_else(|| CommandError::InvalidArgument("Missing arguments".to_string()))
     {
         Ok(value) => {
-            let mut db_entry = DBEntry::from_string(value, DBEntryValueType::StringType);
+            let mut db_entry = DBEntry::from_string(value);
             if args.len() > 2 && args[2].to_lowercase() == "px" {
                 let _ = db_entry.set_ttl(args.get(3));
             }
@@ -314,6 +319,40 @@ async fn _sync_replicas(raw_command: String, sender: &broadcast::Sender<Arc<Vec<
     }
 }
 
+async fn xadd(
+    stream: Arc<RwLock<TcpStream>>,
+    command: Command,
+    _server_metadata: &Arc<RwLock<ServerMetadata>>,
+) {
+    let args = command.args;
+    let mut storage = STORAGE.lock().await;
+
+    // Create the stream
+    let stream_name = args.first().unwrap().to_owned();
+    let stream_id_str = args.get(1).unwrap();
+    let stream_id = StreamId::parse(stream_id_str).unwrap();
+    let fields: Vec<(String, String)> = args
+        .get(2..)
+        .unwrap()
+        .chunks_exact(2)
+        .map(|c| (c[0].clone(), c[1].clone()))
+        .collect();
+    let mut stream_entries = StreamType::default();
+    match stream_entries.add(stream_id, fields) {
+        Ok(id) => {
+            let db_entry = DBEntry::from_stream(stream_entries);
+            storage.insert(stream_name, db_entry);
+            let id_str = id.to_string();
+            _write_stream_and_flush(
+                &stream,
+                format!("${}\r\n{}\r\n", id_str.len(), id_str).as_str(),
+            )
+            .await;
+        }
+        Err(_) => println!("Error"),
+    };
+}
+
 async fn get(
     stream: Arc<RwLock<TcpStream>>,
     command: Command,
@@ -334,16 +373,15 @@ async fn type_fn(
     command: Command,
     _server_metadata: &Arc<RwLock<ServerMetadata>>,
 ) {
-    println!("hello from type");
     let args = command.args;
     let key = args.first().unwrap();
     let storage = STORAGE.lock().await;
     let res = match storage.get(key) {
         // TODO: read the type dynamically.
-        Some(_) => "+string\r\n",
-        None => "+none\r\n",
+        Some(entry) => format!("+{}\r\n", entry.value().unwrap().type_name()),
+        None => "+none\r\n".to_string(),
     };
-    _write_stream_and_flush(&stream, res).await;
+    _write_stream_and_flush(&stream, res.as_str()).await;
 }
 
 async fn info(
@@ -405,8 +443,8 @@ async fn config(
 }
 
 fn format_result(value: &DBEntry) -> String {
-    match value.to_string() {
-        Ok(value) => format!("${}\r\n{}\r\n", value.len(), value),
+    match value.value() {
+        Ok(v) => format!("${}\r\n{}\r\n", v.len(), v),
         Err(_) => "$-1\r\n".to_string(),
     }
 }
