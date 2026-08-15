@@ -5,3 +5,4 @@ pub mod rdb;
 pub mod server;
 pub mod server_info;
 pub mod storage;
+pub mod types;

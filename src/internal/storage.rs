@@ -1,8 +1,10 @@
-use crate::internal::commands::CommandError::StorageError;
+use crate::internal::{
+    commands::CommandError::StorageError,
+    types::{DBValue, StreamType},
+};
 use core::str;
 use std::{
     collections::HashMap,
-    fmt::Display,
     time::{Duration, SystemTime},
 };
 use tokio::sync::Mutex;
@@ -14,25 +16,29 @@ lazy_static! {
 }
 
 pub struct DBEntry {
-    item: DBEntryValue,
+    item: Box<dyn DBValue>,
     metadata: DBEntryMetadata,
 }
 
 impl DBEntry {
-    pub fn from_string(value: &str, value_type: DBEntryValueType) -> Self {
+    pub fn from_string(value: &str) -> Self {
         // TODO: add check for `px` parameter
         DBEntry {
-            item: DBEntryValue {
-                value: value.to_string(),
-                type_: value_type,
-            },
+            item: Box::new(value.to_string()),
             metadata: DBEntryMetadata { expire_at: None },
         }
     }
 
-    pub fn to_string(&self) -> Result<String, CommandError> {
+    pub fn from_stream(value: StreamType) -> Self {
+        DBEntry {
+            item: Box::new(value),
+            metadata: DBEntryMetadata { expire_at: None },
+        }
+    }
+
+    pub fn value(&self) -> Result<&dyn DBValue, CommandError> {
         if self.still_valid() {
-            return Ok(self.item.value.clone());
+            return Ok(self.item.as_ref());
         }
 
         Err(StorageError("Value has expired".to_string()))
@@ -69,23 +75,6 @@ impl DBEntry {
         }
         true
     }
-}
-
-impl Display for DBEntry {
-    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
-        write!(f, "{:?}{}", self.item.type_, self.item.value)
-    }
-}
-
-pub struct DBEntryValue {
-    value: String,
-    type_: DBEntryValueType,
-}
-
-#[derive(Debug)]
-pub enum DBEntryValueType {
-    StringType,
-    _ListType,
 }
 
 #[derive(Debug, Clone, Copy)]

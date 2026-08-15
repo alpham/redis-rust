@@ -1,6 +1,6 @@
 use tokio::sync::MutexGuard;
 
-use crate::internal::storage::{DBEntry, DBEntryValueType, STORAGE};
+use crate::internal::storage::{DBEntry, STORAGE};
 use std::{
     collections::HashMap,
     path::Path,
@@ -145,7 +145,7 @@ fn create_value(
 ) {
     let key = reader.read_string();
     let value = reader.read_string();
-    let mut db_entry = DBEntry::from_string(&value, DBEntryValueType::StringType);
+    let mut db_entry = DBEntry::from_string(&value);
     if let Some(ex_time) = expiration_time {
         db_entry.set_expiry_at(UNIX_EPOCH + Duration::from_millis(ex_time));
     }
