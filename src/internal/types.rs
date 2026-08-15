@@ -1,4 +1,5 @@
 use std::{
+    any::Any,
     collections::BTreeMap,
     fmt::{Display, Formatter, Result as FmtResult},
 };
@@ -8,6 +9,7 @@ use crate::internal::commands::CommandError;
 pub trait DBValue: Sync + Send + Display {
     fn type_name(&self) -> &'static str;
     fn len(&self) -> usize;
+    fn as_any_mut(&mut self) -> &mut dyn Any;
 }
 
 impl DBValue for String {
@@ -17,6 +19,10 @@ impl DBValue for String {
 
     fn type_name(&self) -> &'static str {
         "string"
+    }
+
+    fn as_any_mut(&mut self) -> &mut dyn Any {
+        self
     }
 }
 
@@ -28,13 +34,28 @@ pub struct StreamId {
     seq: u64,
 }
 
+fn invalid_id() -> CommandError {
+    CommandError::InvalidArgument(
+        "Invalid stream ID specified as stream command argument".to_string(),
+    )
+}
+
 impl StreamId {
-    pub fn parse(s: &str) -> Option<Self> {
-        let (ms, seq) = s.split_once('-')?;
-        Some(StreamId {
-            millis: ms.parse().ok()?,
-            seq: seq.parse().ok()?,
-        })
+    pub fn parse(s: &str) -> Result<Self, CommandError> {
+        let (ms, seq) = s.split_once("-").ok_or_else(invalid_id)?;
+
+        let id = StreamId {
+            millis: ms.parse().map_err(|_| invalid_id())?,
+            seq: seq.parse().map_err(|_| invalid_id())?,
+        };
+
+        if id.millis == 0 && id.seq == 0 {
+            return Err(CommandError::InvalidArgument(
+                "The ID specified in XADD must be greater than 0-0".to_string(),
+            ));
+        }
+
+        Ok(id)
     }
 }
 
@@ -58,6 +79,10 @@ impl DBValue for StreamType {
     fn type_name(&self) -> &'static str {
         "stream"
     }
+
+    fn as_any_mut(&mut self) -> &mut dyn Any {
+        self
+    }
 }
 
 impl Display for StreamType {
@@ -74,7 +99,10 @@ impl StreamType {
     ) -> Result<StreamId, CommandError> {
         if let Some((last, _)) = self.entries.last_key_value() {
             if id <= *last {
-                return Err(CommandError::InvalidArgument("The ID spedified in the XADD is equal or smaller than the targt stream top item".to_string()));
+                return Err(CommandError::InvalidArgument(
+                    "The ID specified in XADD is equal or smaller than the target stream top item"
+                        .to_string(),
+                ));
             }
         }
         self.entries.insert(id, fields);

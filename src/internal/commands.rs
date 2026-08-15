@@ -337,19 +337,35 @@ async fn xadd(
         .chunks_exact(2)
         .map(|c| (c[0].clone(), c[1].clone()))
         .collect();
-    let mut stream_entries = StreamType::default();
-    match stream_entries.add(stream_id, fields) {
-        Ok(id) => {
-            let db_entry = DBEntry::from_stream(stream_entries);
-            storage.insert(stream_name, db_entry);
-            let id_str = id.to_string();
-            _write_stream_and_flush(
-                &stream,
-                format!("${}\r\n{}\r\n", id_str.len(), id_str).as_str(),
-            )
-            .await;
-        }
-        Err(_) => println!("Error"),
+
+    let entry = storage
+        .entry(stream_name)
+        .or_insert_with(|| DBEntry::from_stream(StreamType::default()));
+    let stream_entry = entry.value_mut().unwrap().downcast_mut::<StreamType>();
+
+    match stream_entry {
+        None => println!("cannot retrieve the stream from storage"),
+        Some(se) => match se.add(stream_id, fields) {
+            Ok(id) => {
+                // let db_entry = DBEntry::from_stream(stream_entries);
+                // storage.insert(stream_name, db_entry);
+                let id_str = id.to_string();
+                _write_stream_and_flush(
+                    &stream,
+                    format!("${}\r\n{}\r\n", id_str.len(), id_str).as_str(),
+                )
+                .await;
+            }
+            Err(e) => {
+                eprintln!("{}", e);
+                match e {
+                    CommandError::InvalidArgument(iae) => {
+                        _write_stream_and_flush(&stream, format!("-ERR {}\r\n", iae).as_str()).await
+                    }
+                    _ => println!("Unhandled error"),
+                }
+            }
+        },
     };
 }
 
