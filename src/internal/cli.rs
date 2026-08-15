@@ -28,11 +28,10 @@ pub struct Replicaof {
     pub port: u16,
 }
 
+#[allow(unused)]
 #[derive(Debug)]
 pub enum ParseReplicaofError {
-    #[allow(dead_code)]
     InvalidArguments,
-    #[allow(dead_code)]
     ParseIntError(ParseIntError),
 }
 
