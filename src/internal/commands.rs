@@ -43,6 +43,15 @@ impl Display for CommandError {
     }
 }
 
+impl CommandError {
+    fn as_resp(&self) -> String {
+        match self {
+            CommandError::InvalidArgument(st) => format!("-ERR {}\r\n", st),
+            _ => "Error".to_string(),
+        }
+    }
+}
+
 pub type CommandFn = Arc<
     dyn for<'a> Fn(
             Arc<RwLock<TcpStream>>,
@@ -318,55 +327,48 @@ async fn _sync_replicas(raw_command: String, sender: &broadcast::Sender<Arc<Vec<
         let _ = sender.send(v);
     }
 }
-
 async fn xadd(
     stream: Arc<RwLock<TcpStream>>,
     command: Command,
     _server_metadata: &Arc<RwLock<ServerMetadata>>,
 ) {
+    let res = match xadd_inner(command).await {
+        Ok(id) => {
+            let s = id.to_string();
+            format!("${}\r\n{}\r\n", s.len(), s)
+        }
+        Err(e) => e.as_resp(),
+    };
+
+    _write_stream_and_flush(&stream, res.as_str()).await;
+}
+
+async fn xadd_inner(command: Command) -> Result<StreamId, CommandError> {
     let args = command.args;
-    let mut storage = STORAGE.lock().await;
 
     // Create the stream
-    let stream_name = args.first().unwrap().to_owned();
-    let stream_id_str = args.get(1).unwrap();
-    let stream_id = StreamId::parse(stream_id_str).unwrap();
-    let fields: Vec<(String, String)> = args
-        .get(2..)
-        .unwrap()
+    let key = args.first().ok_or_else(|| _worng_args("xadd"))?;
+    let stream_id_str = args.get(1).ok_or_else(|| _worng_args("xadd"))?;
+    let stream_id = StreamId::parse(stream_id_str)?;
+    let rest = args.get(2..).unwrap_or(&[]);
+    if rest.is_empty() {
+        return Err(_worng_args("xadd"));
+    }
+    let fields: Vec<(String, String)> = rest
         .chunks_exact(2)
         .map(|c| (c[0].clone(), c[1].clone()))
         .collect();
 
+    let mut storage = STORAGE.lock().await;
     let entry = storage
-        .entry(stream_name)
+        .entry(key.clone())
         .or_insert_with(|| DBEntry::from_stream(StreamType::default()));
-    let stream_entry = entry.value_mut().unwrap().downcast_mut::<StreamType>();
 
-    match stream_entry {
-        None => println!("cannot retrieve the stream from storage"),
-        Some(se) => match se.add(stream_id, fields) {
-            Ok(id) => {
-                // let db_entry = DBEntry::from_stream(stream_entries);
-                // storage.insert(stream_name, db_entry);
-                let id_str = id.to_string();
-                _write_stream_and_flush(
-                    &stream,
-                    format!("${}\r\n{}\r\n", id_str.len(), id_str).as_str(),
-                )
-                .await;
-            }
-            Err(e) => {
-                eprintln!("{}", e);
-                match e {
-                    CommandError::InvalidArgument(iae) => {
-                        _write_stream_and_flush(&stream, format!("-ERR {}\r\n", iae).as_str()).await
-                    }
-                    _ => println!("Unhandled error"),
-                }
-            }
-        },
-    };
+    let stream = entry
+        .value_mut()?
+        .downcast_mut::<StreamType>()
+        .ok_or_else(_worng_type)?;
+    stream.add(stream_id, fields)
 }
 
 async fn get(
@@ -475,4 +477,14 @@ async fn _write_stream_and_flush(stream: &Arc<RwLock<TcpStream>>, res: &str) {
         .flush()
         .await
         .map_err(|e| format!("Error while flushing the stream: {}", e));
+}
+
+fn _worng_args(cmd: &str) -> CommandError {
+    CommandError::InvalidArgument(format!("worng number of arguments for '{}' command", cmd))
+}
+
+fn _worng_type() -> CommandError {
+    CommandError::StorageError(
+        "WRONGTYPE Operation against a key holding the worng kind of value".to_string(),
+    )
 }
