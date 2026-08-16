@@ -41,6 +41,12 @@ fn invalid_id() -> CommandError {
     )
 }
 
+fn exhausted_id() -> CommandError {
+    CommandError::InvalidArgument(
+        "The stream has exhausted the last possible ID, unable to add more items".to_string(),
+    )
+}
+
 impl Display for StreamId {
     fn fmt(&self, f: &mut Formatter<'_>) -> FmtResult {
         write!(f, "{}-{}", self.millis, self.seq)
@@ -75,12 +81,31 @@ impl Display for StreamType {
 
 impl StreamType {
     ///Sequence number to use when the caller writes `<ms>-*`.
-    fn next_seq(&self, millis: u64) -> u64 {
+    fn next_seq(&self, millis: u64) -> Result<u64, CommandError> {
         match self.entries.last_key_value() {
-            Some((last, _)) if last.millis == millis => last.seq + 1,
-            Some(_) => 0,
-            None if millis == 0 => 1,
-            None => 0,
+            Some((last, _)) if last.millis == millis => {
+                last.seq.checked_add(1).ok_or_else(exhausted_id)
+            }
+            Some(_) => Ok(0),
+            None if millis == 0 => Ok(1),
+            None => Ok(0),
+        }
+    }
+
+    fn next_millis(&self) -> u64 {
+        let current_millis = SystemTime::now()
+            .duration_since(UNIX_EPOCH)
+            .unwrap()
+            .as_millis() as u64;
+        match self.entries.last_key_value() {
+            Some((last, _)) => {
+                if last.millis >= current_millis {
+                    last.millis
+                } else {
+                    current_millis
+                }
+            }
+            None => current_millis,
         }
     }
 
@@ -88,16 +113,13 @@ impl StreamType {
         let millis;
         let seq;
         if s == "*" {
-            millis = SystemTime::now()
-                .duration_since(UNIX_EPOCH)
-                .unwrap()
-                .as_millis() as u64;
-            seq = self.next_seq(millis);
+            millis = self.next_millis();
+            seq = self.next_seq(millis).unwrap();
         } else {
             let (ms_str, seq_str) = s.split_once('-').ok_or_else(invalid_id)?;
             millis = ms_str.parse().map_err(|_| invalid_id())?;
             seq = match seq_str {
-                "*" => self.next_seq(millis),
+                "*" => self.next_seq(millis).unwrap(),
                 other => other.parse().map_err(|_| invalid_id())?,
             };
             if millis == 0 && seq == 0 {
