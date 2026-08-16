@@ -92,23 +92,6 @@ impl StreamType {
         }
     }
 
-    fn next_millis(&self) -> u64 {
-        let current_millis = SystemTime::now()
-            .duration_since(UNIX_EPOCH)
-            .unwrap()
-            .as_millis() as u64;
-        match self.entries.last_key_value() {
-            Some((last, _)) => {
-                if last.millis >= current_millis {
-                    last.millis
-                } else {
-                    current_millis
-                }
-            }
-            None => current_millis,
-        }
-    }
-
     /// ID to use when the caller writes `*`
     fn next_auto_id(&self) -> Result<StreamId, CommandError> {
         let now = SystemTime::now()
