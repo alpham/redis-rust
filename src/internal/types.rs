@@ -2,6 +2,7 @@ use std::{
     any::Any,
     collections::BTreeMap,
     fmt::{Display, Formatter, Result as FmtResult},
+    time::{SystemTime, UNIX_EPOCH},
 };
 
 use crate::internal::commands::CommandError;
@@ -84,18 +85,26 @@ impl StreamType {
     }
 
     pub fn parse_stream_id(&self, s: &str) -> Result<StreamId, CommandError> {
-        let (ms_str, seq_str) = s.split_once("-").ok_or_else(invalid_id)?;
-
-        let millis = ms_str.parse().map_err(|_| invalid_id())?;
-        let seq = match seq_str {
-            "*" => self.next_seq(millis),
-            other => other.parse().map_err(|_| invalid_id())?,
-        };
-
-        if millis == 0 && seq == 0 {
-            return Err(CommandError::InvalidArgument(
-                "The ID specified in XADD must be greater than 0-0".to_string(),
-            ));
+        let millis;
+        let seq;
+        if s == "*" {
+            millis = SystemTime::now()
+                .duration_since(UNIX_EPOCH)
+                .unwrap()
+                .as_millis() as u64;
+            seq = self.next_seq(millis);
+        } else {
+            let (ms_str, seq_str) = s.split_once('-').ok_or_else(invalid_id)?;
+            millis = ms_str.parse().map_err(|_| invalid_id())?;
+            seq = match seq_str {
+                "*" => self.next_seq(millis),
+                other => other.parse().map_err(|_| invalid_id())?,
+            };
+            if millis == 0 && seq == 0 {
+                return Err(CommandError::InvalidArgument(
+                    "The ID specified in XADD must be greater than 0-0".to_string(),
+                ));
+            }
         }
 
         Ok(StreamId { millis, seq })
