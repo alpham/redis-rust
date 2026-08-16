@@ -109,24 +109,57 @@ impl StreamType {
         }
     }
 
+    /// ID to use when the caller writes `*`
+    fn next_auto_id(&self) -> Result<StreamId, CommandError> {
+        let now = SystemTime::now()
+            .duration_since(UNIX_EPOCH)
+            .expect("system clock is before UNIX_EPOCH")
+            .as_millis() as u64;
+
+        let Some((last, _)) = self.entries.last_key_value() else {
+            return Ok(StreamId {
+                millis: now,
+                seq: u64::from(now == 0),
+            });
+        };
+
+        if last.millis < now {
+            return Ok(StreamId {
+                millis: now,
+                seq: 0,
+            });
+        }
+
+        // Clock is at or behind the top entry (same millisecond, an explicitly
+        // written future ID, or a backwards clock step): keep its millis and take
+        // the next sequence, carrying into millis when the sequence is exhausted.
+        match last.seq.checked_add(1) {
+            Some(seq) => Ok(StreamId {
+                millis: last.millis,
+                seq,
+            }),
+            None => last
+                .millis
+                .checked_add(1)
+                .map(|millis| StreamId { millis, seq: 0 })
+                .ok_or_else(exhausted_id),
+        }
+    }
+
     pub fn parse_stream_id(&self, s: &str) -> Result<StreamId, CommandError> {
-        let millis;
-        let seq;
         if s == "*" {
-            millis = self.next_millis();
-            seq = self.next_seq(millis).unwrap();
-        } else {
-            let (ms_str, seq_str) = s.split_once('-').ok_or_else(invalid_id)?;
-            millis = ms_str.parse().map_err(|_| invalid_id())?;
-            seq = match seq_str {
-                "*" => self.next_seq(millis).unwrap(),
-                other => other.parse().map_err(|_| invalid_id())?,
-            };
-            if millis == 0 && seq == 0 {
-                return Err(CommandError::InvalidArgument(
-                    "The ID specified in XADD must be greater than 0-0".to_string(),
-                ));
-            }
+            return self.next_auto_id();
+        }
+        let (ms_str, seq_str) = s.split_once('-').ok_or_else(invalid_id)?;
+        let millis = ms_str.parse().map_err(|_| invalid_id())?;
+        let seq = match seq_str {
+            "*" => self.next_seq(millis).unwrap(),
+            other => other.parse().map_err(|_| invalid_id())?,
+        };
+        if millis == 0 && seq == 0 {
+            return Err(CommandError::InvalidArgument(
+                "The ID specified in XADD must be greater than 0-0".to_string(),
+            ));
         }
 
         Ok(StreamId { millis, seq })
