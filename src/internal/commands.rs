@@ -349,25 +349,26 @@ async fn xadd_inner(command: Command) -> Result<StreamId, CommandError> {
     // Create the stream
     let key = args.first().ok_or_else(|| _worng_args("xadd"))?;
     let stream_id_str = args.get(1).ok_or_else(|| _worng_args("xadd"))?;
-    let stream_id = StreamId::parse(stream_id_str)?;
     let rest = args.get(2..).unwrap_or(&[]);
     if rest.is_empty() {
         return Err(_worng_args("xadd"));
     }
-    let fields: Vec<(String, String)> = rest
-        .chunks_exact(2)
-        .map(|c| (c[0].clone(), c[1].clone()))
-        .collect();
 
     let mut storage = STORAGE.lock().await;
     let entry = storage
         .entry(key.clone())
         .or_insert_with(|| DBEntry::from_stream(StreamType::default()));
-
     let stream = entry
         .value_mut()?
         .downcast_mut::<StreamType>()
         .ok_or_else(_worng_type)?;
+
+    let stream_id = stream.parse_stream_id(stream_id_str)?;
+    let fields: Vec<(String, String)> = rest
+        .chunks_exact(2)
+        .map(|c| (c[0].clone(), c[1].clone()))
+        .collect();
+
     stream.add(stream_id, fields)
 }
 

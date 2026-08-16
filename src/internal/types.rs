@@ -30,33 +30,14 @@ impl DBValue for String {
 /// StreamId is meant for parsing and retrieving a stream id.
 #[derive(Debug, Copy, Clone, PartialEq, Eq, PartialOrd, Ord)]
 pub struct StreamId {
-    millis: u64,
-    seq: u64,
+    pub millis: u64,
+    pub seq: u64,
 }
 
 fn invalid_id() -> CommandError {
     CommandError::InvalidArgument(
         "Invalid stream ID specified as stream command argument".to_string(),
     )
-}
-
-impl StreamId {
-    pub fn parse(s: &str) -> Result<Self, CommandError> {
-        let (ms, seq) = s.split_once("-").ok_or_else(invalid_id)?;
-
-        let id = StreamId {
-            millis: ms.parse().map_err(|_| invalid_id())?,
-            seq: seq.parse().map_err(|_| invalid_id())?,
-        };
-
-        if id.millis == 0 && id.seq == 0 {
-            return Err(CommandError::InvalidArgument(
-                "The ID specified in XADD must be greater than 0-0".to_string(),
-            ));
-        }
-
-        Ok(id)
-    }
 }
 
 impl Display for StreamId {
@@ -92,6 +73,34 @@ impl Display for StreamType {
 }
 
 impl StreamType {
+    ///Sequence number to use when the caller writes `<ms>-*`.
+    fn next_seq(&self, millis: u64) -> u64 {
+        match self.entries.last_key_value() {
+            Some((last, _)) if last.millis == millis => last.seq + 1,
+            Some(_) => 0,
+            None if millis == 0 => 1,
+            None => 0,
+        }
+    }
+
+    pub fn parse_stream_id(&self, s: &str) -> Result<StreamId, CommandError> {
+        let (ms_str, seq_str) = s.split_once("-").ok_or_else(invalid_id)?;
+
+        let millis = ms_str.parse().map_err(|_| invalid_id())?;
+        let seq = match seq_str {
+            "*" => self.next_seq(millis),
+            other => other.parse().map_err(|_| invalid_id())?,
+        };
+
+        if millis == 0 && seq == 0 {
+            return Err(CommandError::InvalidArgument(
+                "The ID specified in XADD must be greater than 0-0".to_string(),
+            ));
+        }
+
+        Ok(StreamId { millis, seq })
+    }
+
     pub fn add(
         &mut self,
         id: StreamId,
