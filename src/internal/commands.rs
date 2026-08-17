@@ -101,6 +101,7 @@ lazy_static! {
         type_fn => type_fn,
         xadd => xadd,
         xrange => xrange,
+        xread => xread,
     };
 }
 
@@ -118,6 +119,7 @@ lazy_static! {
         wait => wait,
         xadd => xadd,
         xrange => xrange,
+        xread => xread,
     };
 }
 
@@ -328,6 +330,46 @@ async fn _sync_replicas(raw_command: String, sender: &broadcast::Sender<Arc<Vec<
         let v = Arc::new(raw_command.into_bytes());
         let _ = sender.send(v);
     }
+}
+
+async fn xread(
+    stream: Arc<RwLock<TcpStream>>,
+    command: Command,
+    _server_metadata: &Arc<RwLock<ServerMetadata>>,
+) {
+    let res = match xread_inner(command).await {
+        Ok(stream_resp) => stream_resp,
+        Err(e) => e.as_resp(),
+    };
+    _write_stream_and_flush(&stream, res.as_str()).await;
+}
+
+async fn xread_inner(command: Command) -> Result<String, CommandError> {
+    let args = command.args;
+
+    let _type = args.first().ok_or_else(|| _wrong_args("xread"))?;
+    let key = args.get(1).ok_or_else(|| _wrong_args("xread"))?;
+    let id = args.get(2).ok_or_else(|| _wrong_args("xread"))?;
+
+    let storage = STORAGE.lock().await;
+    let entry = storage.get(key).ok_or_else(|| _missing_entry("xrange"))?;
+
+    let stream = entry
+        .value()?
+        .as_any()
+        .downcast_ref::<StreamType>()
+        .to_owned()
+        .ok_or_else(_wrong_type)?;
+
+    let body = stream.to_resp_range(
+        StreamId::from(id),
+        StreamId {
+            millis: u64::MAX,
+            seq: u64::MAX,
+        },
+    );
+    let res = format!("*1\r\n*2\r\n${}\r\n{}\r\n{}", key.len(), key, body);
+    Ok(res)
 }
 
 async fn xrange(
