@@ -358,11 +358,22 @@ async fn xrange_inner(command: Command) -> Result<String, CommandError> {
         .downcast_ref::<StreamType>()
         .to_owned()
         .ok_or_else(_wrong_type)?;
-    if start == "-" {
-        return Ok(stream.to_resp_range(StreamId { millis: 0, seq: 0 }, StreamId::from(end)));
-    }
+    let start_stream = if start == "-" {
+        StreamId { millis: 0, seq: 0 }
+    } else {
+        StreamId::from(start)
+    };
 
-    Ok(stream.to_resp_range(StreamId::from(start), StreamId::from(end)))
+    let end_stream = if end == "+" {
+        StreamId {
+            millis: u64::MAX,
+            seq: u64::MAX,
+        }
+    } else {
+        StreamId::from(end)
+    };
+
+    Ok(stream.to_resp_range(start_stream, end_stream))
 }
 
 async fn xadd(
