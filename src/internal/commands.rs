@@ -100,6 +100,7 @@ lazy_static! {
         set => set,
         type_fn => type_fn,
         xadd => xadd,
+        xrange => xrange,
     };
 }
 
@@ -116,6 +117,7 @@ lazy_static! {
         type_fn => type_fn,
         wait => wait,
         xadd => xadd,
+        xrange => xrange,
     };
 }
 
@@ -327,6 +329,39 @@ async fn _sync_replicas(raw_command: String, sender: &broadcast::Sender<Arc<Vec<
         let _ = sender.send(v);
     }
 }
+
+async fn xrange(
+    stream: Arc<RwLock<TcpStream>>,
+    command: Command,
+    _server_metadata: &Arc<RwLock<ServerMetadata>>,
+) {
+    let res = match xrange_inner(command).await {
+        Ok(stream_entity) => stream_entity,
+        Err(e) => e.as_resp(),
+    };
+    _write_stream_and_flush(&stream, res.as_str()).await;
+}
+
+async fn xrange_inner(command: Command) -> Result<String, CommandError> {
+    let args = command.args;
+
+    // Create the stream
+    let key = args.first().ok_or_else(|| _wrong_args("xrange"))?;
+    let start = args.get(1).ok_or_else(|| _wrong_args("xrange"))?;
+    let end = args.get(2).ok_or_else(|| _wrong_args("xrange"))?;
+    let storage = STORAGE.lock().await;
+    let entry = storage.get(key).ok_or_else(|| _missing_entry("xrange"))?;
+
+    let stream = entry
+        .value()?
+        .as_any()
+        .downcast_ref::<StreamType>()
+        .to_owned()
+        .ok_or_else(_wrong_type)?;
+
+    Ok(stream.to_resp_range(StreamId::from(start), StreamId::from(end)))
+}
+
 async fn xadd(
     stream: Arc<RwLock<TcpStream>>,
     command: Command,
@@ -347,11 +382,11 @@ async fn xadd_inner(command: Command) -> Result<StreamId, CommandError> {
     let args = command.args;
 
     // Create the stream
-    let key = args.first().ok_or_else(|| _worng_args("xadd"))?;
-    let stream_id_str = args.get(1).ok_or_else(|| _worng_args("xadd"))?;
+    let key = args.first().ok_or_else(|| _wrong_args("xadd"))?;
+    let stream_id_str = args.get(1).ok_or_else(|| _wrong_args("xadd"))?;
     let rest = args.get(2..).unwrap_or(&[]);
     if rest.is_empty() {
-        return Err(_worng_args("xadd"));
+        return Err(_wrong_args("xadd"));
     }
 
     let mut storage = STORAGE.lock().await;
@@ -360,8 +395,9 @@ async fn xadd_inner(command: Command) -> Result<StreamId, CommandError> {
         .or_insert_with(|| DBEntry::from_stream(StreamType::default()));
     let stream = entry
         .value_mut()?
+        .as_any_mut()
         .downcast_mut::<StreamType>()
-        .ok_or_else(_worng_type)?;
+        .ok_or_else(_wrong_type)?;
 
     let stream_id = stream.parse_stream_id(stream_id_str)?;
     let fields: Vec<(String, String)> = rest
@@ -480,12 +516,19 @@ async fn _write_stream_and_flush(stream: &Arc<RwLock<TcpStream>>, res: &str) {
         .map_err(|e| format!("Error while flushing the stream: {}", e));
 }
 
-fn _worng_args(cmd: &str) -> CommandError {
-    CommandError::InvalidArgument(format!("worng number of arguments for '{}' command", cmd))
+fn _wrong_args(cmd: &str) -> CommandError {
+    CommandError::InvalidArgument(format!("wrong number of arguments for '{}' command", cmd))
 }
 
-fn _worng_type() -> CommandError {
+fn _wrong_type() -> CommandError {
     CommandError::StorageError(
-        "WRONGTYPE Operation against a key holding the worng kind of value".to_string(),
+        "WRONGTYPE Operation against a key holding the wrong kind of value".to_string(),
     )
+}
+
+fn _missing_entry(cmd: &str) -> CommandError {
+    CommandError::StorageError(format!(
+        "The ID sent in {} command id not found in the storage",
+        cmd
+    ))
 }

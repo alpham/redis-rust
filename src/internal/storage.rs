@@ -4,7 +4,6 @@ use crate::internal::{
 };
 use core::str;
 use std::{
-    any::Any,
     collections::HashMap,
     time::{Duration, SystemTime},
 };
@@ -45,9 +44,9 @@ impl DBEntry {
         Err(StorageError("Value has expired".to_string()))
     }
 
-    pub fn value_mut(&mut self) -> Result<&mut dyn Any, CommandError> {
+    pub fn value_mut(&mut self) -> Result<&mut dyn DBValue, CommandError> {
         if self.still_valid() {
-            return Ok(self.item.as_any_mut());
+            return Ok(self.item.as_mut());
         }
 
         Err(StorageError("Value has expired".to_string()))

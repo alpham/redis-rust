@@ -1,7 +1,7 @@
 use std::{
     any::Any,
     collections::BTreeMap,
-    fmt::{Display, Formatter, Result as FmtResult},
+    fmt::{Display, Formatter, Result as FmtResult, Write},
     time::{SystemTime, UNIX_EPOCH},
 };
 
@@ -11,6 +11,9 @@ pub trait DBValue: Sync + Send + Display {
     fn type_name(&self) -> &'static str;
     fn len(&self) -> usize;
     fn as_any_mut(&mut self) -> &mut dyn Any;
+    fn as_any(&self) -> &dyn Any;
+    #[allow(unused)]
+    fn as_resp(&self) -> String;
 }
 
 impl DBValue for String {
@@ -25,6 +28,14 @@ impl DBValue for String {
     fn as_any_mut(&mut self) -> &mut dyn Any {
         self
     }
+
+    fn as_any(&self) -> &dyn Any {
+        self
+    }
+
+    fn as_resp(&self) -> String {
+        todo!()
+    }
 }
 
 // StreamId implementation
@@ -33,6 +44,16 @@ impl DBValue for String {
 pub struct StreamId {
     pub millis: u64,
     pub seq: u64,
+}
+
+impl From<&String> for StreamId {
+    fn from(s: &String) -> Self {
+        let (ms, seq) = s.split_once('-').expect("Invalid format");
+        StreamId {
+            millis: ms.parse().expect("invalid millis"),
+            seq: seq.parse().expect("invalid seq"),
+        }
+    }
 }
 
 fn invalid_id() -> CommandError {
@@ -57,20 +78,6 @@ impl Display for StreamId {
 #[derive(Debug, Default, Clone)]
 pub struct StreamType {
     entries: BTreeMap<StreamId, Vec<(String, String)>>,
-}
-
-impl DBValue for StreamType {
-    fn len(&self) -> usize {
-        self.entries.len()
-    }
-
-    fn type_name(&self) -> &'static str {
-        "stream"
-    }
-
-    fn as_any_mut(&mut self) -> &mut dyn Any {
-        self
-    }
 }
 
 impl Display for StreamType {
@@ -163,5 +170,49 @@ impl StreamType {
         }
         self.entries.insert(id, fields);
         Ok(id)
+    }
+
+    pub fn to_resp_range(&self, start: StreamId, end: StreamId) -> String {
+        if start > end {
+            return "*0\r\n".to_string();
+        }
+
+        let range = self.entries.range(start..=end);
+        let mut count = 0;
+        let mut body = String::new();
+        for (id, entries) in range {
+            let id_str = id.to_string();
+            let _ = write!(body, "*2\r\n${}\r\n{}\r\n", id_str.len(), id_str);
+            let _ = write!(body, "*{}\r\n", entries.len() * 2);
+            for entry in entries {
+                let _ = write!(body, "${}\r\n{}\r\n", entry.0.len(), entry.0);
+                let _ = write!(body, "${}\r\n{}\r\n", entry.1.len(), entry.1);
+            }
+            count += 1;
+        }
+        format!("*{}\r\n{}", count, body)
+    }
+}
+
+impl DBValue for StreamType {
+    fn len(&self) -> usize {
+        self.entries.len()
+    }
+
+    fn type_name(&self) -> &'static str {
+        "stream"
+    }
+
+    fn as_any_mut(&mut self) -> &mut dyn Any {
+        self
+    }
+
+    fn as_any(&self) -> &dyn Any {
+        self
+    }
+
+    fn as_resp(&self) -> String {
+        let id = StreamId { millis: 0, seq: 0 };
+        self.to_resp_range(id, id)
     }
 }
