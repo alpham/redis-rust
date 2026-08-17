@@ -358,6 +358,9 @@ async fn xrange_inner(command: Command) -> Result<String, CommandError> {
         .downcast_ref::<StreamType>()
         .to_owned()
         .ok_or_else(_wrong_type)?;
+    if start == "-" {
+        return Ok(stream.to_resp_range(StreamId { millis: 0, seq: 0 }, StreamId::from(end)));
+    }
 
     Ok(stream.to_resp_range(StreamId::from(start), StreamId::from(end)))
 }
