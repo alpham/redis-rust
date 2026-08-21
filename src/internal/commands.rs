@@ -347,29 +347,43 @@ async fn xread(
 async fn xread_inner(command: Command) -> Result<String, CommandError> {
     let args = command.args;
 
-    let _type = args.first().ok_or_else(|| _wrong_args("xread"))?;
-    let key = args.get(1).ok_or_else(|| _wrong_args("xread"))?;
-    let id = args.get(2).ok_or_else(|| _wrong_args("xread"))?;
-
+    let position = args
+        .iter()
+        .position(|s| "streams".eq_ignore_ascii_case(s))
+        .ok_or_else(|| _wrong_args("xread"))?;
+    let rest = &args[position + 1..];
+    if rest.is_empty() || rest.len() % 2 == 1 {
+        return Err(CommandError::InvalidArgument(
+            "Unbalanced XREAD list of streams: for each stream key an ID or '$' must be specified"
+                .to_string(),
+        ));
+    }
     let storage = STORAGE.lock().await;
-    let entry = storage.get(key).ok_or_else(|| _missing_entry("xrange"))?;
+    let mut res = Vec::new();
 
-    let stream = entry
-        .value()?
-        .as_any()
-        .downcast_ref::<StreamType>()
-        .to_owned()
-        .ok_or_else(_wrong_type)?;
+    let (keys, ids) = rest.split_at(rest.len() / 2);
+    for (key, id) in keys.iter().zip(ids) {
+        let entry = storage.get(key).ok_or_else(|| _missing_entry("xrange"))?;
 
-    let body = stream.to_resp_range(
-        StreamId::from(id),
-        StreamId {
-            millis: u64::MAX,
-            seq: u64::MAX,
-        },
-    );
-    let res = format!("*1\r\n*2\r\n${}\r\n{}\r\n{}", key.len(), key, body);
-    Ok(res)
+        let stream = entry
+            .value()?
+            .as_any()
+            .downcast_ref::<StreamType>()
+            .to_owned()
+            .ok_or_else(_wrong_type)?;
+
+        let body = stream.to_resp_range(
+            StreamId::from(id),
+            StreamId {
+                millis: u64::MAX,
+                seq: u64::MAX,
+            },
+        );
+
+        res.push(format!("*2\r\n${}\r\n{}\r\n{}", key.len(), key, body));
+    }
+
+    Ok(format!("*{}\r\n{}", res.len(), res.join("")))
 }
 
 async fn xrange(
