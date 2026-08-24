@@ -1,6 +1,4 @@
-use tokio::sync::MutexGuard;
-
-use crate::internal::storage::{DBEntry, STORAGE};
+use crate::internal::storage::{with_storage, DBEntry};
 use std::{
     collections::HashMap,
     path::Path,
@@ -88,7 +86,6 @@ pub async fn load_rdb(dir: &Path, dbfilename: &str) {
 
     let mut reader = RdbReader::new(&data);
     reader.pos = 9;
-    let mut storage = STORAGE.lock().await;
     let mut expiration: Option<u64> = None;
 
     loop {
@@ -129,7 +126,7 @@ pub async fn load_rdb(dir: &Path, dbfilename: &str) {
                 expiration = Some(secs as u64 * 1000);
             }
             0x00 => {
-                create_value(&mut storage, &mut reader, expiration);
+                with_storage(|storage| create_value(storage, &mut reader, expiration));
                 expiration = None;
             }
             0xFF => break,
@@ -139,7 +136,7 @@ pub async fn load_rdb(dir: &Path, dbfilename: &str) {
 }
 
 fn create_value(
-    storage: &mut MutexGuard<'_, HashMap<String, DBEntry>>,
+    storage: &mut HashMap<String, DBEntry>,
     reader: &mut RdbReader,
     expiration_time: Option<u64>,
 ) {

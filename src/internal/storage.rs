@@ -3,16 +3,21 @@ use crate::internal::{
     types::{DBValue, StreamType},
 };
 use core::str;
+use std::sync::Mutex;
 use std::{
     collections::HashMap,
     time::{Duration, SystemTime},
 };
-use tokio::sync::Mutex;
 
 use super::commands::CommandError;
 
 lazy_static! {
     pub static ref STORAGE: Mutex<HashMap<String, DBEntry>> = Mutex::new(HashMap::new());
+}
+
+pub fn with_storage<R>(f: impl FnOnce(&mut HashMap<String, DBEntry>) -> R) -> R {
+    let mut storage = STORAGE.lock().unwrap_or_else(|e| e.into_inner());
+    f(&mut storage)
 }
 
 pub struct DBEntry {
