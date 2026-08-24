@@ -1,7 +1,8 @@
 use std::{
     any::Any,
-    collections::BTreeMap,
+    collections::{btree_map::Range, BTreeMap},
     fmt::{Display, Formatter, Result as FmtResult, Write},
+    ops::{Bound, RangeBounds},
     time::{SystemTime, UNIX_EPOCH},
 };
 
@@ -40,14 +41,14 @@ impl DBValue for String {
 
 // StreamId implementation
 /// StreamId is meant for parsing and retrieving a stream id.
-#[derive(Debug, Copy, Clone, PartialEq, Eq, PartialOrd, Ord)]
+#[derive(Debug, Default, Copy, Clone, PartialEq, Eq, PartialOrd, Ord)]
 pub struct StreamId {
     pub millis: u64,
     pub seq: u64,
 }
 
-impl From<&String> for StreamId {
-    fn from(s: &String) -> Self {
+impl From<&str> for StreamId {
+    fn from(s: &str) -> Self {
         let (ms, seq) = s.split_once('-').expect("Invalid format");
         StreamId {
             millis: ms.parse().expect("invalid millis"),
@@ -172,25 +173,51 @@ impl StreamType {
         Ok(id)
     }
 
-    pub fn to_resp_range(&self, start: StreamId, end: StreamId) -> String {
-        if start > end {
-            return "*0\r\n".to_string();
-        }
+    pub fn last_id(&self) -> Option<StreamId> {
+        self.entries.last_key_value().map(|(id, _)| *id)
+    }
 
-        let range = self.entries.range(start..=end);
+    pub fn to_resp<'a>(
+        entries_range: impl Iterator<Item = (&'a StreamId, &'a Vec<(String, String)>)>,
+    ) -> String {
         let mut count = 0;
         let mut body = String::new();
-        for (id, entries) in range {
+
+        for (id, fields) in entries_range {
             let id_str = id.to_string();
             let _ = write!(body, "*2\r\n${}\r\n{}\r\n", id_str.len(), id_str);
-            let _ = write!(body, "*{}\r\n", entries.len() * 2);
-            for entry in entries {
-                let _ = write!(body, "${}\r\n{}\r\n", entry.0.len(), entry.0);
-                let _ = write!(body, "${}\r\n{}\r\n", entry.1.len(), entry.1);
+            let _ = write!(body, "*{}\r\n", fields.len() * 2);
+            for (name, value) in fields {
+                let _ = write!(body, "${}\r\n{}\r\n", name.len(), name);
+                let _ = write!(body, "${}\r\n{}\r\n", value.len(), value);
             }
             count += 1;
         }
+
         format!("*{}\r\n{}", count, body)
+    }
+
+    fn entries_bounds(
+        &self,
+        range: impl RangeBounds<StreamId>,
+    ) -> Range<'_, StreamId, Vec<(String, String)>> {
+        self.entries.range(range)
+    }
+
+    pub fn entries_range(
+        &self,
+        start: StreamId,
+        end: StreamId,
+    ) -> Range<'_, StreamId, Vec<(String, String)>> {
+        if start > end {
+            return self.entries_bounds(start..start);
+        }
+
+        self.entries_bounds(start..=end)
+    }
+
+    pub fn entries_after(&self, after: StreamId) -> Range<'_, StreamId, Vec<(String, String)>> {
+        self.entries_bounds((Bound::Excluded(after), Bound::Unbounded))
     }
 }
 
@@ -212,7 +239,7 @@ impl DBValue for StreamType {
     }
 
     fn as_resp(&self) -> String {
-        let id = StreamId { millis: 0, seq: 0 };
-        self.to_resp_range(id, id)
+        let range = self.entries_bounds((Bound::Included(StreamId::default()), Bound::Unbounded));
+        StreamType::to_resp(range)
     }
 }

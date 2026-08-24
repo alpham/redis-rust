@@ -5,11 +5,12 @@ use std::{
     future::Future,
     pin::Pin,
     sync::{atomic::Ordering, Arc},
+    time::Duration,
 };
 
 use crate::internal::server::ServerMetadata;
 use crate::internal::server_info;
-use crate::internal::storage::{DBEntry, STORAGE};
+use crate::internal::storage::{with_storage, DBEntry};
 use crate::internal::{
     parser::Command,
     types::{StreamId, StreamType},
@@ -18,6 +19,7 @@ use tokio::{
     io::AsyncWriteExt,
     net::TcpStream,
     sync::{broadcast, RwLock},
+    time::{sleep, timeout},
 };
 
 #[derive(Debug)]
@@ -47,6 +49,7 @@ impl CommandError {
     fn as_resp(&self) -> String {
         match self {
             CommandError::InvalidArgument(st) => format!("-ERR {}\r\n", st),
+            CommandError::StorageError(st) => format!("-ERR {}\r\n", st),
             _ => "Error".to_string(),
         }
     }
@@ -308,11 +311,9 @@ async fn set(
             if args.len() > 2 && args[2].to_lowercase() == "px" {
                 let _ = db_entry.set_ttl(args.get(3));
             }
-            let mut storage = STORAGE.lock().await;
-            storage.insert(key.to_string(), db_entry);
+            set_inner(key, db_entry);
             if metadata.role == 0 {
-                let res = "+OK\r\n";
-                _write_stream_and_flush(&stream, res).await;
+                _write_stream_and_flush(&stream, "+OK\r\n").await;
             }
             let command_size = command.raw_cmd.len() as u64;
             _sync_replicas(command.raw_cmd, &metadata.broadcast).await;
@@ -325,6 +326,12 @@ async fn set(
     }
 }
 
+fn set_inner(key: &str, db_entry: DBEntry) {
+    with_storage(|storage| {
+        storage.insert(key.to_string(), db_entry);
+    })
+}
+
 async fn _sync_replicas(raw_command: String, sender: &broadcast::Sender<Arc<Vec<u8>>>) {
     if sender.receiver_count() > 0 {
         let v = Arc::new(raw_command.into_bytes());
@@ -332,25 +339,53 @@ async fn _sync_replicas(raw_command: String, sender: &broadcast::Sender<Arc<Vec<
     }
 }
 
-async fn xread(
-    stream: Arc<RwLock<TcpStream>>,
-    command: Command,
-    _server_metadata: &Arc<RwLock<ServerMetadata>>,
-) {
-    let res = match xread_inner(command).await {
-        Ok(stream_resp) => stream_resp,
-        Err(e) => e.as_resp(),
-    };
-    _write_stream_and_flush(&stream, res.as_str()).await;
+enum Blocking {
+    No,
+    Forever,
+    For(Duration),
 }
 
-async fn xread_inner(command: Command) -> Result<String, CommandError> {
-    let args = command.args;
+const POLL_INTERVAL: Duration = Duration::from_millis(50);
+
+struct XReadRequest {
+    blocking: Blocking,
+    pairs: Vec<(String, StreamId)>,
+}
+fn last_id(storage: &HashMap<String, DBEntry>, key: &str) -> StreamId {
+    storage
+        .get(key)
+        .and_then(|entry| entry.value().ok())
+        .and_then(|value| value.as_any().downcast_ref::<StreamType>())
+        .and_then(StreamType::last_id)
+        .unwrap_or_default()
+}
+
+fn parse_block(options: &[String]) -> Result<Blocking, CommandError> {
+    let Some(position) = options.iter().position(|o| "block".eq_ignore_ascii_case(o)) else {
+        return Ok(Blocking::No);
+    };
+
+    let value = options
+        .get(position + 1)
+        .ok_or_else(|| _wrong_args("xread"))?;
+    let millis: u64 = value.parse().map_err(|_| {
+        CommandError::InvalidArgument("timeout is not an integer or out of range".to_string())
+    })?;
+    Ok(match millis {
+        0 => Blocking::Forever,
+        n => Blocking::For(Duration::from_millis(n)),
+    })
+}
+
+fn parse_xread(command: &Command) -> Result<XReadRequest, CommandError> {
+    let args = &command.args;
 
     let position = args
         .iter()
         .position(|s| "streams".eq_ignore_ascii_case(s))
         .ok_or_else(|| _wrong_args("xread"))?;
+
+    let blocking = parse_block(&args[..position])?;
     let rest = &args[position + 1..];
     if rest.is_empty() || rest.len() % 2 == 1 {
         return Err(CommandError::InvalidArgument(
@@ -358,32 +393,97 @@ async fn xread_inner(command: Command) -> Result<String, CommandError> {
                 .to_string(),
         ));
     }
-    let storage = STORAGE.lock().await;
-    let mut res = Vec::new();
 
     let (keys, ids) = rest.split_at(rest.len() / 2);
-    for (key, id) in keys.iter().zip(ids) {
-        let entry = storage.get(key).ok_or_else(|| _missing_entry("xrange"))?;
 
-        let stream = entry
-            .value()?
-            .as_any()
-            .downcast_ref::<StreamType>()
-            .to_owned()
-            .ok_or_else(_wrong_type)?;
+    let pairs = with_storage(|storage| {
+        keys.iter()
+            .zip(ids)
+            .map(|(key, id)| {
+                let after = if id == "$" {
+                    last_id(storage, key)
+                } else {
+                    StreamId::from(id.as_str())
+                };
+                (key.clone(), after)
+            })
+            .collect()
+    });
+    Ok(XReadRequest { blocking, pairs })
+}
 
-        let body = stream.to_resp_range(
-            StreamId::from(id),
-            StreamId {
-                millis: u64::MAX,
-                seq: u64::MAX,
-            },
-        );
-
-        res.push(format!("*2\r\n${}\r\n{}\r\n{}", key.len(), key, body));
+fn stream_to_resp(
+    entry: &DBEntry,
+    key: &str,
+    after: StreamId,
+) -> Result<Option<String>, CommandError> {
+    let stream = entry
+        .value()?
+        .as_any()
+        .downcast_ref::<StreamType>()
+        .ok_or_else(_wrong_type)?;
+    let mut range = stream.entries_after(after).peekable();
+    if range.peek().is_none() {
+        return Ok(None);
     }
 
-    Ok(format!("*{}\r\n{}", res.len(), res.join("")))
+    let body = StreamType::to_resp(range);
+    Ok(Some(format!("*2\r\n${}\r\n{}\r\n{}", key.len(), key, body)))
+}
+
+fn xread_once(pairs: &[(String, StreamId)]) -> Result<Option<String>, CommandError> {
+    with_storage(|storage| {
+        let mut res = Vec::new();
+
+        for (key, after) in pairs {
+            let Some(entry) = storage.get(key) else {
+                continue;
+            };
+
+            if let Some(item) = stream_to_resp(entry, key, *after)? {
+                res.push(item);
+            }
+        }
+
+        if res.is_empty() {
+            return Ok(None);
+        }
+        Ok(Some(format!("*{}\r\n{}", res.len(), res.join(""))))
+    })
+}
+
+async fn poll_until_data(pairs: &[(String, StreamId)]) -> Result<String, CommandError> {
+    loop {
+        if let Some(resp) = xread_once(pairs)? {
+            return Ok(resp);
+        }
+        sleep(POLL_INTERVAL).await;
+    }
+}
+async fn xread_run(command: &Command) -> Result<String, CommandError> {
+    let request = parse_xread(command)?;
+
+    let found = match request.blocking {
+        Blocking::No => xread_once(&request.pairs)?,
+        Blocking::Forever => Some(poll_until_data(&request.pairs).await?),
+        Blocking::For(duration) => match timeout(duration, poll_until_data(&request.pairs)).await {
+            Ok(result) => Some(result?),
+            Err(_elapsed) => None,
+        },
+    };
+
+    Ok(found.unwrap_or_else(|| "*-1\r\n".to_string()))
+}
+async fn xread(
+    stream: Arc<RwLock<TcpStream>>,
+    command: Command,
+    _server_metadata: &Arc<RwLock<ServerMetadata>>,
+) {
+    let res = match xread_run(&command).await {
+        Ok(resp) => resp,
+        Err(e) => e.as_resp(),
+    };
+    _write_stream_and_flush(&stream, res.as_str()).await;
 }
 
 async fn xrange(
@@ -391,45 +491,46 @@ async fn xrange(
     command: Command,
     _server_metadata: &Arc<RwLock<ServerMetadata>>,
 ) {
-    let res = match xrange_inner(command).await {
+    let res = match xrange_inner(command) {
         Ok(stream_entity) => stream_entity,
         Err(e) => e.as_resp(),
     };
     _write_stream_and_flush(&stream, res.as_str()).await;
 }
 
-async fn xrange_inner(command: Command) -> Result<String, CommandError> {
+fn xrange_inner(command: Command) -> Result<String, CommandError> {
     let args = command.args;
 
     // Create the stream
     let key = args.first().ok_or_else(|| _wrong_args("xrange"))?;
     let start = args.get(1).ok_or_else(|| _wrong_args("xrange"))?;
     let end = args.get(2).ok_or_else(|| _wrong_args("xrange"))?;
-    let storage = STORAGE.lock().await;
-    let entry = storage.get(key).ok_or_else(|| _missing_entry("xrange"))?;
+    with_storage(|storage| {
+        let entry = storage.get(key).ok_or_else(|| _missing_entry("xrange"))?;
 
-    let stream = entry
-        .value()?
-        .as_any()
-        .downcast_ref::<StreamType>()
-        .to_owned()
-        .ok_or_else(_wrong_type)?;
-    let start_stream = if start == "-" {
-        StreamId { millis: 0, seq: 0 }
-    } else {
-        StreamId::from(start)
-    };
+        let stream = entry
+            .value()?
+            .as_any()
+            .downcast_ref::<StreamType>()
+            .ok_or_else(_wrong_type)?;
+        let start_stream = if start == "-" {
+            StreamId { millis: 0, seq: 0 }
+        } else {
+            StreamId::from(start.as_str())
+        };
 
-    let end_stream = if end == "+" {
-        StreamId {
-            millis: u64::MAX,
-            seq: u64::MAX,
-        }
-    } else {
-        StreamId::from(end)
-    };
+        let end_stream = if end == "+" {
+            StreamId {
+                millis: u64::MAX,
+                seq: u64::MAX,
+            }
+        } else {
+            StreamId::from(end.as_str())
+        };
+        let range = stream.entries_range(start_stream, end_stream);
 
-    Ok(stream.to_resp_range(start_stream, end_stream))
+        Ok(StreamType::to_resp(range))
+    })
 }
 
 async fn xadd(
@@ -437,7 +538,7 @@ async fn xadd(
     command: Command,
     _server_metadata: &Arc<RwLock<ServerMetadata>>,
 ) {
-    let res = match xadd_inner(command).await {
+    let res = match xadd_inner(command) {
         Ok(id) => {
             let s = id.to_string();
             format!("${}\r\n{}\r\n", s.len(), s)
@@ -448,7 +549,7 @@ async fn xadd(
     _write_stream_and_flush(&stream, res.as_str()).await;
 }
 
-async fn xadd_inner(command: Command) -> Result<StreamId, CommandError> {
+fn xadd_inner(command: Command) -> Result<StreamId, CommandError> {
     let args = command.args;
 
     // Create the stream
@@ -459,23 +560,24 @@ async fn xadd_inner(command: Command) -> Result<StreamId, CommandError> {
         return Err(_wrong_args("xadd"));
     }
 
-    let mut storage = STORAGE.lock().await;
-    let entry = storage
-        .entry(key.clone())
-        .or_insert_with(|| DBEntry::from_stream(StreamType::default()));
-    let stream = entry
-        .value_mut()?
-        .as_any_mut()
-        .downcast_mut::<StreamType>()
-        .ok_or_else(_wrong_type)?;
+    with_storage(|storage| {
+        let entry = storage
+            .entry(key.clone())
+            .or_insert_with(|| DBEntry::from_stream(StreamType::default()));
+        let stream = entry
+            .value_mut()?
+            .as_any_mut()
+            .downcast_mut::<StreamType>()
+            .ok_or_else(_wrong_type)?;
 
-    let stream_id = stream.parse_stream_id(stream_id_str)?;
-    let fields: Vec<(String, String)> = rest
-        .chunks_exact(2)
-        .map(|c| (c[0].clone(), c[1].clone()))
-        .collect();
+        let stream_id = stream.parse_stream_id(stream_id_str)?;
+        let fields: Vec<(String, String)> = rest
+            .chunks_exact(2)
+            .map(|c| (c[0].clone(), c[1].clone()))
+            .collect();
 
-    stream.add(stream_id, fields)
+        stream.add(stream_id, fields)
+    })
 }
 
 async fn get(
@@ -485,12 +587,15 @@ async fn get(
 ) {
     let args = command.args;
     let key = args.first().unwrap();
-    let storage = STORAGE.lock().await;
-    let res = match storage.get(key) {
+    let res = get_inner(key);
+    _write_stream_and_flush(&stream, res.as_str()).await;
+}
+
+fn get_inner(key: &str) -> String {
+    with_storage(|storage| match storage.get(key) {
         Some(val) => format_result(val),
         None => "$-1\r\n".to_string(),
-    };
-    _write_stream_and_flush(&stream, res.as_str()).await;
+    })
 }
 
 async fn type_fn(
@@ -500,13 +605,15 @@ async fn type_fn(
 ) {
     let args = command.args;
     let key = args.first().unwrap();
-    let storage = STORAGE.lock().await;
-    let res = match storage.get(key) {
-        // TODO: read the type dynamically.
+    let res = type_fn_inner(key);
+    _write_stream_and_flush(&stream, res.as_str()).await;
+}
+
+fn type_fn_inner(key: &str) -> String {
+    with_storage(|storage| match storage.get(key) {
         Some(entry) => format!("+{}\r\n", entry.value().unwrap().type_name()),
         None => "+none\r\n".to_string(),
-    };
-    _write_stream_and_flush(&stream, res.as_str()).await;
+    })
 }
 
 async fn info(
@@ -534,12 +641,18 @@ async fn keys(
     _command: Command,
     _server_metadata: &Arc<RwLock<ServerMetadata>>,
 ) {
-    let storage = STORAGE.lock().await;
-    let mut res = format!("*{}\r\n", storage.len());
-    for key in storage.keys() {
-        res.push_str(&format!("${}\r\n{}\r\n", key.len(), key));
-    }
+    let res = keys_inner();
     _write_stream_and_flush(&stream, res.as_str()).await;
+}
+
+fn keys_inner() -> String {
+    with_storage(|storage| {
+        let mut res = format!("*{}\r\n", storage.len());
+        for key in storage.keys() {
+            res.push_str(&format!("${}\r\n{}\r\n", key.len(), key));
+        }
+        res
+    })
 }
 
 async fn config(
