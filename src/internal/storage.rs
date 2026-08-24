@@ -1,3 +1,5 @@
+use tokio::sync::Notify;
+
 use crate::internal::{
     commands::CommandError::StorageError,
     types::{DBValue, StreamType},
@@ -13,6 +15,8 @@ use super::commands::CommandError;
 
 lazy_static! {
     pub static ref STORAGE: Mutex<HashMap<String, DBEntry>> = Mutex::new(HashMap::new());
+    /// Signalled after any stream gains a new entry. Blocked XREAD clients wait on this.
+    pub static ref STREAM_ADDED: Notify = Notify::new();
 }
 
 pub fn with_storage<R>(f: impl FnOnce(&mut HashMap<String, DBEntry>) -> R) -> R {

@@ -10,7 +10,7 @@ use std::{
 
 use crate::internal::server::ServerMetadata;
 use crate::internal::server_info;
-use crate::internal::storage::{with_storage, DBEntry};
+use crate::internal::storage::{with_storage, DBEntry, STREAM_ADDED};
 use crate::internal::{
     parser::Command,
     types::{StreamId, StreamType},
@@ -19,7 +19,7 @@ use tokio::{
     io::AsyncWriteExt,
     net::TcpStream,
     sync::{broadcast, RwLock},
-    time::{sleep, timeout},
+    time::timeout,
 };
 
 #[derive(Debug)]
@@ -345,8 +345,6 @@ enum Blocking {
     For(Duration),
 }
 
-const POLL_INTERVAL: Duration = Duration::from_millis(50);
-
 struct XReadRequest {
     blocking: Blocking,
     pairs: Vec<(String, StreamId)>,
@@ -454,10 +452,11 @@ fn xread_once(pairs: &[(String, StreamId)]) -> Result<Option<String>, CommandErr
 
 async fn poll_until_data(pairs: &[(String, StreamId)]) -> Result<String, CommandError> {
     loop {
+        let notified = STREAM_ADDED.notified();
         if let Some(resp) = xread_once(pairs)? {
             return Ok(resp);
         }
-        sleep(POLL_INTERVAL).await;
+        notified.await;
     }
 }
 async fn xread_run(command: &Command) -> Result<String, CommandError> {
@@ -560,7 +559,7 @@ fn xadd_inner(command: Command) -> Result<StreamId, CommandError> {
         return Err(_wrong_args("xadd"));
     }
 
-    with_storage(|storage| {
+    let stream_id = with_storage(|storage| {
         let entry = storage
             .entry(key.clone())
             .or_insert_with(|| DBEntry::from_stream(StreamType::default()));
@@ -577,7 +576,13 @@ fn xadd_inner(command: Command) -> Result<StreamId, CommandError> {
             .collect();
 
         stream.add(stream_id, fields)
-    })
+    })?;
+
+    // Lock released. Wake readers only after the entry is visible — and only after
+    // we're no longer holding the lock they'll immediately need.
+    STREAM_ADDED.notify_waiters();
+
+    Ok(stream_id)
 }
 
 async fn get(
