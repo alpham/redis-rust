@@ -47,13 +47,15 @@ pub struct StreamId {
     pub seq: u64,
 }
 
-impl From<&str> for StreamId {
-    fn from(s: &str) -> Self {
-        let (ms, seq) = s.split_once('-').expect("Invalid format");
-        StreamId {
-            millis: ms.parse().expect("invalid millis"),
-            seq: seq.parse().expect("invalid seq"),
-        }
+impl TryFrom<&str> for StreamId {
+    type Error = CommandError;
+
+    fn try_from(s: &str) -> Result<Self, Self::Error> {
+        let (ms, seq) = s.split_once('-').ok_or_else(invalid_id)?;
+        Ok(StreamId {
+            millis: ms.parse().map_err(|_| invalid_id())?,
+            seq: seq.parse().map_err(|_| invalid_id())?,
+        })
     }
 }
 
@@ -141,19 +143,25 @@ impl StreamType {
         if s == "*" {
             return self.next_auto_id();
         }
-        let (ms_str, seq_str) = s.split_once('-').ok_or_else(invalid_id)?;
-        let millis = ms_str.parse().map_err(|_| invalid_id())?;
-        let seq = match seq_str {
-            "*" => self.next_seq(millis).unwrap(),
-            other => other.parse().map_err(|_| invalid_id())?,
+
+        let id = match s.split_once('-') {
+            Some((ms_str, "*")) => {
+                let millis = ms_str.parse().map_err(|_| invalid_id())?;
+                StreamId {
+                    millis,
+                    seq: self.next_seq(millis)?,
+                }
+            }
+            _ => StreamId::try_from(s)?,
         };
-        if millis == 0 && seq == 0 {
+
+        if id.millis == 0 && id.seq == 0 {
             return Err(CommandError::InvalidArgument(
                 "The ID specified in XADD must be greater than 0-0".to_string(),
             ));
         }
 
-        Ok(StreamId { millis, seq })
+        Ok(id)
     }
 
     pub fn add(

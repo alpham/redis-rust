@@ -401,12 +401,13 @@ fn parse_xread(command: &Command) -> Result<XReadRequest, CommandError> {
                 let after = if id == "$" {
                     last_id(storage, key)
                 } else {
-                    StreamId::from(id.as_str())
+                    StreamId::try_from(id.as_str())?
                 };
-                (key.clone(), after)
+                Ok((key.clone(), after))
             })
-            .collect()
-    });
+            .collect::<Result<Vec<_>, CommandError>>()
+    })?;
+
     Ok(XReadRequest { blocking, pairs })
 }
 
@@ -515,7 +516,7 @@ fn xrange_inner(command: Command) -> Result<String, CommandError> {
         let start_stream = if start == "-" {
             StreamId { millis: 0, seq: 0 }
         } else {
-            StreamId::from(start.as_str())
+            StreamId::try_from(start.as_str())?
         };
 
         let end_stream = if end == "+" {
@@ -524,7 +525,7 @@ fn xrange_inner(command: Command) -> Result<String, CommandError> {
                 seq: u64::MAX,
             }
         } else {
-            StreamId::from(end.as_str())
+            StreamId::try_from(end.as_str())?
         };
         let range = stream.entries_range(start_stream, end_stream);
 
