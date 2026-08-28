@@ -105,6 +105,7 @@ lazy_static! {
         xadd => xadd,
         xrange => xrange,
         xread => xread,
+        incr => incr,
     };
 }
 
@@ -123,6 +124,7 @@ lazy_static! {
         xadd => xadd,
         xrange => xrange,
         xread => xread,
+        incr => incr,
     };
 }
 
@@ -661,6 +663,42 @@ fn keys_inner() -> String {
     })
 }
 
+async fn incr(
+    stream: Arc<RwLock<TcpStream>>,
+    command: Command,
+    _server_metadata: &Arc<RwLock<ServerMetadata>>,
+) {
+    let args = command.args;
+    let key = args.first().unwrap();
+    let res = match incr_inner(key.as_str()) {
+        Ok(value) => format!(":{}\r\n", value),
+        Err(e) => e.as_resp(),
+    };
+    _write_stream_and_flush(&stream, res.as_str()).await;
+}
+
+fn incr_inner(key: &str) -> Result<i64, CommandError> {
+    with_storage(|storage| {
+        let entry = storage
+            .entry(key.to_string())
+            .or_insert_with(|| DBEntry::from_string("0"));
+        let value = entry
+            .value_mut()?
+            .as_any_mut()
+            .downcast_mut::<String>()
+            .ok_or_else(_wrong_type)?;
+        let new_value = value
+            .parse::<i64>()
+            .map_err(|_| _not_an_integer())?
+            .checked_add(1)
+            .ok_or_else(|| {
+                CommandError::InvalidArgument("increment or decrement would overflow".to_string())
+            })?;
+        *value = new_value.to_string();
+        Ok(new_value)
+    })
+}
+
 async fn config(
     stream: Arc<RwLock<TcpStream>>,
     command: Command,
@@ -720,4 +758,8 @@ fn _missing_entry(cmd: &str) -> CommandError {
         "The ID sent in {} command id not found in the storage",
         cmd
     ))
+}
+
+fn _not_an_integer() -> CommandError {
+    CommandError::InvalidArgument("value is not an integer or out of range".to_string())
 }
