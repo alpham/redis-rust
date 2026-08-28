@@ -106,8 +106,6 @@ lazy_static! {
         xrange => xrange,
         xread => xread,
         incr => incr,
-        multi => multi,
-        exec => exec,
     };
 }
 
@@ -127,8 +125,6 @@ lazy_static! {
         xrange => xrange,
         xread => xread,
         incr => incr,
-        multi => multi,
-        exec => exec,
     };
 }
 
@@ -154,21 +150,6 @@ pub async fn run_command(
     }
 }
 
-async fn multi(
-    stream: Arc<RwLock<TcpStream>>,
-    _command: Command,
-    _server_metadata: &Arc<RwLock<ServerMetadata>>,
-) {
-    _write_stream_and_flush(&stream, "+OK\r\n").await;
-}
-
-async fn exec(
-    _stream: Arc<RwLock<TcpStream>>,
-    _command: Command,
-    _server_metadata: &Arc<RwLock<ServerMetadata>>,
-) {
-    todo!()
-}
 async fn replconf(
     stream: Arc<RwLock<TcpStream>>,
     command: Command,
@@ -750,7 +731,7 @@ fn format_result(value: &DBEntry) -> String {
     }
 }
 
-async fn _write_stream_and_flush(stream: &Arc<RwLock<TcpStream>>, res: &str) {
+pub(crate) async fn _write_stream_and_flush(stream: &Arc<RwLock<TcpStream>>, res: &str) {
     let mut stream = stream.write().await;
     let _ = stream
         .write_all(res.as_bytes())

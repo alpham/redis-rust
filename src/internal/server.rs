@@ -30,6 +30,12 @@ pub struct ServerMetadata {
     _host: String,
 }
 
+#[derive(Default)]
+struct TxState {
+    in_multi: bool,
+    queue: Vec<parser::Command>,
+}
+
 fn get_master_replid() -> String {
     "8371b4fb1155b71f4a04d3e1bc3e18c4a990aeeb".to_string()
 }
@@ -164,6 +170,7 @@ async fn handle_client(
     let mut buf = [0u8; 255];
     let command_reg = command_registry.unwrap_or(&commands::COMMANDS_REGISTRY);
     let mut is_psync = false;
+    let mut tx = TxState::default();
     loop {
         let mut locked_stream = stream.write().await;
         match locked_stream.read(&mut buf).await {
@@ -172,13 +179,74 @@ async fn handle_client(
                 drop(locked_stream);
                 let commands = parser::parse_request(&buf[..length]).unwrap();
                 for command in commands {
-                    if command.cmd.to_lowercase() == "psync" {
-                        is_psync = true;
-                        break;
+                    let name = command.cmd.to_lowercase();
+
+                    match name.as_str() {
+                        "psync" => {
+                            is_psync = true;
+                            break;
+                        }
+                        "multi" => {
+                            let reply = if tx.in_multi {
+                                "-Err MULTI calls can not be nested\r\n"
+                            } else {
+                                tx.in_multi = true;
+                                "+OK\r\n"
+                            };
+                            commands::_write_stream_and_flush(&stream, reply).await;
+                        }
+                        "discard" => {
+                            let reply = if tx.in_multi {
+                                tx.in_multi = false;
+                                tx.queue.clear();
+                                "+OK\r\n"
+                            } else {
+                                "-ERR DISCARD without MULTI\r\n"
+                            };
+                            commands::_write_stream_and_flush(&stream, reply).await;
+                        }
+                        "exec" if !tx.in_multi => {
+                            commands::_write_stream_and_flush(
+                                &stream,
+                                "-ERR EXEC without MULTI\r\n",
+                            )
+                            .await;
+                        }
+                        "exec" => {
+                            tx.in_multi = false;
+                            let queued = std::mem::take(&mut tx.queue);
+                            commands::_write_stream_and_flush(
+                                &stream,
+                                &format!("*{}\r\n", queued.len()),
+                            )
+                            .await;
+                            for queued_command in queued {
+                                commands::run_command(
+                                    Arc::clone(&stream),
+                                    queued_command,
+                                    server_metadata,
+                                    command_reg,
+                                )
+                                .await;
+                            }
+                        }
+                        _ if tx.in_multi => {
+                            tx.queue.push(command);
+                            commands::_write_stream_and_flush(&stream, "+QUEUED\r\n").await;
+                        }
+                        _ => {
+                            let stream_clone = Arc::clone(&stream);
+                            commands::run_command(
+                                stream_clone,
+                                command,
+                                server_metadata,
+                                command_reg,
+                            )
+                            .await
+                        }
                     }
-                    let stream_clone = Arc::clone(&stream);
-                    commands::run_command(stream_clone, command, server_metadata, command_reg).await
                 }
+
                 if is_psync {
                     break;
                 }
