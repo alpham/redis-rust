@@ -1,6 +1,6 @@
 use std::{
     any::Any,
-    collections::{btree_map::Range, BTreeMap},
+    collections::{btree_map::Range, BTreeMap, VecDeque},
     fmt::{Display, Formatter, Result as FmtResult, Write},
     ops::{Bound, RangeBounds},
     time::{SystemTime, UNIX_EPOCH},
@@ -254,7 +254,7 @@ impl DBValue for StreamType {
 
 #[derive(Debug, Default, Clone)]
 pub struct ListType {
-    pub entries: Vec<String>,
+    pub entries: VecDeque<String>,
 }
 
 impl Display for ListType {

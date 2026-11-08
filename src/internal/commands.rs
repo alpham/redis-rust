@@ -110,6 +110,7 @@ lazy_static! {
         lpush => lpush,
         llen => llen,
         lrange => lrange,
+        lpop => lpop,
         incr => incr,
     };
 }
@@ -133,6 +134,7 @@ lazy_static! {
         lpush => lpush,
         lrange => lrange,
         llen => llen,
+        lpop => lpop,
         incr => incr,
     };
 }
@@ -681,6 +683,50 @@ fn xpush_inner(
     Ok(list_len.to_string())
 }
 
+async fn lpop(
+    stream: Arc<RwLock<TcpStream>>,
+    command: Command,
+    _server_metadata: &Arc<RwLock<ServerMetadata>>,
+) {
+    let res = match xpop_inner(command, true) {
+        Ok(s) => {
+            format!("${}\r\n{}\r\n", s.len(), s)
+        }
+        Err(e) => e.as_resp(),
+    };
+    _write_stream_and_flush(&stream, res.as_str()).await;
+}
+
+fn xpop_inner(command: Command, from_left: bool) -> Result<String, CommandError> {
+    let args = command.args;
+    let cmd = command.cmd.as_str();
+    let key = args.first().ok_or_else(|| _wrong_args(cmd))?;
+
+    let pop_item = with_storage(|storage| {
+        let entry = storage
+            .entry(key.clone())
+            .or_insert_with(|| DBEntry::from_list(ListType::default()));
+        let list = entry
+            .value_mut()?
+            .as_any_mut()
+            .downcast_mut::<ListType>()
+            .ok_or_else(_wrong_type)?;
+
+        let result = if from_left {
+            list.entries.pop_front().ok_or_else(|| {
+                CommandError::StorageError("cannot find eleemnts to pop".to_string())
+            })?
+        } else {
+            list.entries.pop_back().ok_or_else(|| {
+                CommandError::StorageError("cannot find eleemnts to pop".to_string())
+            })?
+        };
+        Ok(result)
+    })?;
+
+    Ok(pop_item.to_string())
+}
+
 async fn lrange(
     stream: Arc<RwLock<TcpStream>>,
     command: Command,
@@ -728,7 +774,9 @@ fn lrange_inner(command: Command) -> Result<String, CommandError> {
         if range_end >= list.entries.len() {
             range_end = list.entries.len() - 1;
         }
-        Ok(ListType::to_resp(&list.entries[range_start..=range_end]))
+        Ok(ListType::to_resp(
+            list.entries.range(range_start..=range_end),
+        ))
     })
 }
 
