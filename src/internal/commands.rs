@@ -1,4 +1,5 @@
 use std::{
+    cmp::max,
     collections::HashMap,
     error::Error,
     fmt::{Display, Formatter},
@@ -660,8 +661,20 @@ fn lrange_inner(command: Command) -> Result<String, CommandError> {
             .as_any()
             .downcast_ref::<ListType>()
             .ok_or_else(_wrong_type)?;
-        let range_start = start.parse::<usize>().map_err(|_| _not_an_integer())?;
-        let mut range_end = end.parse::<usize>().map_err(|_| _not_an_integer())?;
+        let mut _start = start.parse::<i32>().map_err(|_| _not_an_integer())?;
+        let mut _end = end.parse::<i32>().map_err(|_| _not_an_integer())?;
+        // handling negative ranges
+        let list_length = list.entries.len() as i32;
+        let mut range_start = _start as usize;
+        let mut range_end = _end as usize;
+        if _start < 0 {
+            range_start = max(list_length + _start, 0) as usize;
+        }
+        if _end < 0 {
+            range_end = max(list_length + _end, 0) as usize;
+        }
+
+        // handling edge cases.
         if range_start > range_end || range_start >= list.entries.len() {
             return Ok(empty_arr);
         }
