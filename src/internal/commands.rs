@@ -689,18 +689,30 @@ async fn lpop(
     _server_metadata: &Arc<RwLock<ServerMetadata>>,
 ) {
     let res = match xpop_inner(command, true) {
-        Ok(s) => {
-            format!("${}\r\n{}\r\n", s.len(), s)
+        Ok(result) => {
+            if result.len() == 1 {
+                match result.first() {
+                    Some(res_1) => format!("{}\r\n", res_1).to_string(),
+                    None => "$0\r\n".to_string(),
+                }
+            } else {
+                format!("*{}\r\n{}\r\n", result.len(), result.join("\r\n")).to_string()
+            }
         }
         Err(e) => e.as_resp(),
     };
     _write_stream_and_flush(&stream, res.as_str()).await;
 }
 
-fn xpop_inner(command: Command, from_left: bool) -> Result<String, CommandError> {
+fn xpop_inner(command: Command, from_left: bool) -> Result<Vec<String>, CommandError> {
     let args = command.args;
     let cmd = command.cmd.as_str();
     let key = args.first().ok_or_else(|| _wrong_args(cmd))?;
+    let num_pop = args
+        .get(1)
+        .unwrap_or(&"1".to_string())
+        .parse::<i32>()
+        .map_err(|_| _not_an_integer())?;
 
     let pop_item = with_storage(|storage| {
         let entry = storage
@@ -712,19 +724,25 @@ fn xpop_inner(command: Command, from_left: bool) -> Result<String, CommandError>
             .downcast_mut::<ListType>()
             .ok_or_else(_wrong_type)?;
 
-        let result = if from_left {
-            list.entries.pop_front().ok_or_else(|| {
-                CommandError::StorageError("cannot find eleemnts to pop".to_string())
-            })?
-        } else {
-            list.entries.pop_back().ok_or_else(|| {
-                CommandError::StorageError("cannot find eleemnts to pop".to_string())
-            })?
-        };
+        let mut result: Vec<String> = Vec::new();
+
+        for _ in 0..num_pop {
+            let item = if from_left {
+                list.entries.pop_front().ok_or_else(|| {
+                    CommandError::StorageError("cannot find eleemnts to pop".to_string())
+                })?
+            } else {
+                list.entries.pop_back().ok_or_else(|| {
+                    CommandError::StorageError("cannot find eleemnts to pop".to_string())
+                })?
+            };
+            result.push(format!("${}\r\n{}", item.len(), item).to_string())
+        }
+
         Ok(result)
     })?;
 
-    Ok(pop_item.to_string())
+    Ok(pop_item)
 }
 
 async fn lrange(
