@@ -8,13 +8,13 @@ use std::{
     time::Duration,
 };
 
-use crate::internal::server::ServerMetadata;
 use crate::internal::server_info;
 use crate::internal::storage::{with_storage, DBEntry, STREAM_ADDED};
 use crate::internal::{
     parser::Command,
     types::{StreamId, StreamType},
 };
+use crate::internal::{server::ServerMetadata, types::ListType};
 use tokio::{
     io::AsyncWriteExt,
     net::TcpStream,
@@ -105,6 +105,7 @@ lazy_static! {
         xadd => xadd,
         xrange => xrange,
         xread => xread,
+        rpush => rpush,
         incr => incr,
     };
 }
@@ -124,6 +125,7 @@ lazy_static! {
         xadd => xadd,
         xrange => xrange,
         xread => xread,
+        rpush => rpush,
         incr => incr,
     };
 }
@@ -586,6 +588,45 @@ fn xadd_inner(command: Command) -> Result<StreamId, CommandError> {
     STREAM_ADDED.notify_waiters();
 
     Ok(stream_id)
+}
+
+async fn rpush(
+    stream: Arc<RwLock<TcpStream>>,
+    command: Command,
+    _server_metadata: &Arc<RwLock<ServerMetadata>>,
+) {
+    let res = match rpush_inner(command) {
+        Ok(length) => {
+            let s = length.to_string();
+            format!(":{}\r\n", s)
+        }
+        Err(e) => e.as_resp(),
+    };
+    _write_stream_and_flush(&stream, res.as_str()).await;
+}
+
+fn rpush_inner(command: Command) -> Result<String, CommandError> {
+    let args = command.args;
+    let key = args.first().ok_or_else(|| _wrong_args("rpush"))?;
+    let value = args.get(1).unwrap_or(&String::default()).to_owned();
+    if value.is_empty() {
+        return Err(_wrong_args("rpush"));
+    }
+
+    let list_len = with_storage(|storage| {
+        let entry = storage
+            .entry(key.clone())
+            .or_insert_with(|| DBEntry::from_list(ListType::default()));
+        let list = entry
+            .value_mut()?
+            .as_any_mut()
+            .downcast_mut::<ListType>()
+            .ok_or_else(_wrong_type)?;
+        list.entries.push(value);
+        Ok(list.entries.len())
+    })?;
+
+    Ok(list_len.to_string())
 }
 
 async fn get(

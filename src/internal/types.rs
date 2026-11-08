@@ -251,3 +251,36 @@ impl DBValue for StreamType {
         StreamType::to_resp(range)
     }
 }
+
+#[derive(Debug, Default, Clone)]
+pub struct ListType {
+    pub entries: Vec<String>,
+}
+
+impl Display for ListType {
+    fn fmt(&self, f: &mut Formatter<'_>) -> FmtResult {
+        write!(f, "{} entries", self.entries.len())
+    }
+}
+
+impl DBValue for ListType {
+    fn len(&self) -> usize {
+        self.entries.len()
+    }
+
+    fn type_name(&self) -> &'static str {
+        "list"
+    }
+
+    fn as_any_mut(&mut self) -> &mut dyn Any {
+        self
+    }
+
+    fn as_any(&self) -> &dyn Any {
+        self
+    }
+
+    fn as_resp(&self) -> String {
+        todo!()
+    }
+}

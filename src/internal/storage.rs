@@ -2,7 +2,7 @@ use tokio::sync::Notify;
 
 use crate::internal::{
     commands::CommandError::StorageError,
-    types::{DBValue, StreamType},
+    types::{DBValue, ListType, StreamType},
 };
 use core::str;
 use std::sync::Mutex;
@@ -34,6 +34,13 @@ impl DBEntry {
         // TODO: add check for `px` parameter
         DBEntry {
             item: Box::new(value.to_string()),
+            metadata: DBEntryMetadata { expire_at: None },
+        }
+    }
+
+    pub fn from_list(value: ListType) -> Self {
+        DBEntry {
+            item: Box::new(value),
             metadata: DBEntryMetadata { expire_at: None },
         }
     }
