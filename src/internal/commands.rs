@@ -108,6 +108,7 @@ lazy_static! {
         xread => xread,
         rpush => rpush,
         lpush => lpush,
+        llen => llen,
         lrange => lrange,
         incr => incr,
     };
@@ -131,6 +132,7 @@ lazy_static! {
         rpush => rpush,
         lpush => lpush,
         lrange => lrange,
+        llen => llen,
         incr => incr,
     };
 }
@@ -600,7 +602,7 @@ async fn rpush(
     command: Command,
     _server_metadata: &Arc<RwLock<ServerMetadata>>,
 ) {
-    let res = match xpush_inner(command, false) {
+    let res = match xpush_inner(command, false, false) {
         Ok(length) => {
             let s = length.to_string();
             format!(":{}\r\n", s)
@@ -615,7 +617,7 @@ async fn lpush(
     command: Command,
     _server_metadata: &Arc<RwLock<ServerMetadata>>,
 ) {
-    let res = match xpush_inner(command, true) {
+    let res = match xpush_inner(command, true, false) {
         Ok(length) => {
             let s = length.to_string();
             format!(":{}\r\n", s)
@@ -625,14 +627,29 @@ async fn lpush(
     _write_stream_and_flush(&stream, res.as_str()).await;
 }
 
-fn xpush_inner(command: Command, insert_to_left: bool) -> Result<String, CommandError> {
+async fn llen(
+    stream: Arc<RwLock<TcpStream>>,
+    command: Command,
+    _server_metadata: &Arc<RwLock<ServerMetadata>>,
+) {
+    let res = match xpush_inner(command, true, true) {
+        Ok(length) => {
+            let s = length.to_string();
+            format!(":{}\r\n", s)
+        }
+        Err(e) => e.as_resp(),
+    };
+    _write_stream_and_flush(&stream, res.as_str()).await;
+}
+
+fn xpush_inner(
+    command: Command,
+    insert_to_left: bool,
+    query_only: bool,
+) -> Result<String, CommandError> {
     let args = command.args;
     let cmd = command.cmd.as_str();
     let key = args.first().ok_or_else(|| _wrong_args(cmd))?;
-    let values = args.get(1..).unwrap_or(&[]).to_owned();
-    if values.is_empty() {
-        return Err(_wrong_args(cmd));
-    }
 
     let list_len = with_storage(|storage| {
         let entry = storage
@@ -643,13 +660,20 @@ fn xpush_inner(command: Command, insert_to_left: bool) -> Result<String, Command
             .as_any_mut()
             .downcast_mut::<ListType>()
             .ok_or_else(_wrong_type)?;
-        for value in values {
-            let index = if insert_to_left {
-                0
-            } else {
-                list.entries.len()
-            };
-            list.entries.insert(index, value);
+        if !query_only {
+            let values = args.get(1..).unwrap_or(&[]).to_owned();
+            if values.is_empty() {
+                return Err(_wrong_args(cmd));
+            }
+
+            for value in values {
+                let index = if insert_to_left {
+                    0
+                } else {
+                    list.entries.len()
+                };
+                list.entries.insert(index, value);
+            }
         }
         Ok(list.entries.len())
     })?;
