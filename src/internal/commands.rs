@@ -107,6 +107,7 @@ lazy_static! {
         xrange => xrange,
         xread => xread,
         rpush => rpush,
+        lpush => lpush,
         lrange => lrange,
         incr => incr,
     };
@@ -128,6 +129,7 @@ lazy_static! {
         xrange => xrange,
         xread => xread,
         rpush => rpush,
+        lpush => lpush,
         lrange => lrange,
         incr => incr,
     };
@@ -598,7 +600,7 @@ async fn rpush(
     command: Command,
     _server_metadata: &Arc<RwLock<ServerMetadata>>,
 ) {
-    let res = match rpush_inner(command) {
+    let res = match xpush_inner(command, false) {
         Ok(length) => {
             let s = length.to_string();
             format!(":{}\r\n", s)
@@ -608,12 +610,28 @@ async fn rpush(
     _write_stream_and_flush(&stream, res.as_str()).await;
 }
 
-fn rpush_inner(command: Command) -> Result<String, CommandError> {
+async fn lpush(
+    stream: Arc<RwLock<TcpStream>>,
+    command: Command,
+    _server_metadata: &Arc<RwLock<ServerMetadata>>,
+) {
+    let res = match xpush_inner(command, true) {
+        Ok(length) => {
+            let s = length.to_string();
+            format!(":{}\r\n", s)
+        }
+        Err(e) => e.as_resp(),
+    };
+    _write_stream_and_flush(&stream, res.as_str()).await;
+}
+
+fn xpush_inner(command: Command, insert_to_left: bool) -> Result<String, CommandError> {
     let args = command.args;
-    let key = args.first().ok_or_else(|| _wrong_args("rpush"))?;
+    let cmd = command.cmd.as_str();
+    let key = args.first().ok_or_else(|| _wrong_args(cmd))?;
     let values = args.get(1..).unwrap_or(&[]).to_owned();
     if values.is_empty() {
-        return Err(_wrong_args("rpush"));
+        return Err(_wrong_args(cmd));
     }
 
     let list_len = with_storage(|storage| {
@@ -626,7 +644,12 @@ fn rpush_inner(command: Command) -> Result<String, CommandError> {
             .downcast_mut::<ListType>()
             .ok_or_else(_wrong_type)?;
         for value in values {
-            list.entries.push(value);
+            let index = if insert_to_left {
+                0
+            } else {
+                list.entries.len()
+            };
+            list.entries.insert(index, value);
         }
         Ok(list.entries.len())
     })?;
