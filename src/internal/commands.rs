@@ -608,8 +608,8 @@ async fn rpush(
 fn rpush_inner(command: Command) -> Result<String, CommandError> {
     let args = command.args;
     let key = args.first().ok_or_else(|| _wrong_args("rpush"))?;
-    let value = args.get(1).unwrap_or(&String::default()).to_owned();
-    if value.is_empty() {
+    let values = args.get(1..).unwrap_or(&[]).to_owned();
+    if values.is_empty() {
         return Err(_wrong_args("rpush"));
     }
 
@@ -622,7 +622,9 @@ fn rpush_inner(command: Command) -> Result<String, CommandError> {
             .as_any_mut()
             .downcast_mut::<ListType>()
             .ok_or_else(_wrong_type)?;
-        list.entries.push(value);
+        for value in values {
+            list.entries.push(value);
+        }
         Ok(list.entries.len())
     })?;
 
