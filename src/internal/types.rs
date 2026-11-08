@@ -284,3 +284,17 @@ impl DBValue for ListType {
         todo!()
     }
 }
+
+impl ListType {
+    pub fn to_resp<'a>(entries_range: impl IntoIterator<Item = &'a String>) -> String {
+        let mut count = 0;
+        let mut body = String::new();
+
+        for entry in entries_range {
+            let _ = write!(body, "${}\r\n{}\r\n", entry.len(), entry);
+            count += 1;
+        }
+
+        format!("*{}\r\n{}", count, body)
+    }
+}

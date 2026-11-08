@@ -106,6 +106,7 @@ lazy_static! {
         xrange => xrange,
         xread => xread,
         rpush => rpush,
+        lrange => lrange,
         incr => incr,
     };
 }
@@ -126,6 +127,7 @@ lazy_static! {
         xrange => xrange,
         xread => xread,
         rpush => rpush,
+        lrange => lrange,
         incr => incr,
     };
 }
@@ -629,6 +631,45 @@ fn rpush_inner(command: Command) -> Result<String, CommandError> {
     })?;
 
     Ok(list_len.to_string())
+}
+
+async fn lrange(
+    stream: Arc<RwLock<TcpStream>>,
+    command: Command,
+    _server_metadata: &Arc<RwLock<ServerMetadata>>,
+) {
+    let res = match lrange_inner(command) {
+        Ok(resp) => resp,
+        Err(e) => e.as_resp(),
+    };
+    _write_stream_and_flush(&stream, res.as_str()).await;
+}
+
+fn lrange_inner(command: Command) -> Result<String, CommandError> {
+    let args = command.args;
+    let key = args.first().ok_or_else(|| _wrong_args("lrange"))?;
+    let start = args.get(1).ok_or_else(|| _wrong_args("lrange"))?;
+    let end = args.get(2).ok_or_else(|| _wrong_args("lrange"))?;
+    with_storage(|storage| {
+        let empty_arr = "*0\r\n".to_string();
+        let entry = storage
+            .entry(key.clone())
+            .or_insert_with(|| DBEntry::from_list(ListType::default()));
+        let list = entry
+            .value()?
+            .as_any()
+            .downcast_ref::<ListType>()
+            .ok_or_else(_wrong_type)?;
+        let range_start = start.parse::<usize>().map_err(|_| _not_an_integer())?;
+        let mut range_end = end.parse::<usize>().map_err(|_| _not_an_integer())?;
+        if range_start > range_end || range_start >= list.entries.len() {
+            return Ok(empty_arr);
+        }
+        if range_end >= list.entries.len() {
+            range_end = list.entries.len() - 1;
+        }
+        Ok(ListType::to_resp(&list.entries[range_start..=range_end]))
+    })
 }
 
 async fn get(
